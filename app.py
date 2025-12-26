@@ -17,10 +17,14 @@ try:
 except ImportError:
     pass
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from graphiti_core import Graphiti
 
 from simple_agent import SimpleAgent
 from core.config import get_config
@@ -42,6 +46,17 @@ from knowledge.retrieval import search_knowledge
 from knowledge.ingest import remember_text, ingest_text_document, resolve_group_id
 
 logger = logging.getLogger(__name__)
+
+
+async def get_graphiti_dep() -> "Graphiti":
+    """
+    FastAPI dependency to get Graphiti instance.
+    
+    This allows tests to override the dependency with a per-test Graphiti instance
+    to avoid event loop conflicts.
+    """
+    graphiti_client = get_graphiti_client()
+    return await graphiti_client.ensure_ready()
 
 
 async def run_ingest_job(job_id: str, content: str, source_description: str | None, memory_type: str = "knowledge", user_id: str = "sergey"):
@@ -344,9 +359,8 @@ async def chat(req: ChatRequest):
 
     try:
         config = get_config()
-        # Get Graphiti client (can fail if Neo4j unavailable)
-        graphiti_client = get_graphiti_client()
-        graphiti = await graphiti_client.ensure_ready()
+        # Get Graphiti via dependency (can be overridden in tests)
+        graphiti = await get_graphiti_dep()
 
         # Create MemoryOps (can fail if Neo4j unavailable)
         from core.memory_ops import MemoryOps
@@ -535,9 +549,8 @@ async def remember(req: RememberRequest):
     - experience: Work patterns and lessons learned
     """
     try:
-        # Get Graphiti client
-        graphiti_client = get_graphiti_client()
-        graphiti = await graphiti_client.ensure_ready()
+        # Get Graphiti via dependency (can be overridden in tests)
+        graphiti = await get_graphiti_dep()
 
         # Create MemoryOps with user from request
         from core.memory_ops import MemoryOps
@@ -717,16 +730,16 @@ async def clear_memory():
 async def knowledge_search(
     q: str,
     limit: int = 10,
-    group_id: str | None = None
+    group_id: str | None = None,
+    graphiti: "Graphiti" = Depends(get_graphiti_dep)
 ):
     """
     Search knowledge base using fulltext search.
     
     Returns matching entities and episodes.
     """
-    await ensure_agent_ready()
     try:
-        items = await search_knowledge(agent.graphiti, q, limit=limit, group_id=group_id)
+        items = await search_knowledge(graphiti, q, limit=limit, group_id=group_id)
         return {"items": items}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc))
@@ -801,8 +814,8 @@ async def health_check():
     Returns health status and connection state.
     """
     try:
-        graphiti_client = get_graphiti_client()
-        graphiti = await graphiti_client.ensure_ready()
+        # Get Graphiti via dependency (can be overridden in tests)
+        graphiti = await get_graphiti_dep()
 
         # Simple Neo4j query to check connectivity
         driver = graphiti.driver

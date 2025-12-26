@@ -18,13 +18,57 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest_asyncio.fixture
-async def async_client():
-    """Create async HTTP client for testing API."""
-    from app import app
+async def graphiti_for_api_test():
+    """
+    Create a per-test Graphiti instance for API tests.
+    
+    This ensures each test uses a Graphiti client bound to the correct event loop,
+    avoiding "Future attached to different loop" errors.
+    """
+    from core.graphiti_client import get_graphiti_client, reset_graphiti_client
+    
+    # Guarantee clean state before test
+    reset_graphiti_client()
+    client = get_graphiti_client(force_new=True)
+    graphiti = await client.ensure_ready()
+    
+    try:
+        yield graphiti
+    finally:
+        # Cleanup: close Neo4j driver and reset singleton
+        try:
+            driver = getattr(graphiti, 'driver', None)
+            if driver and hasattr(driver, 'close'):
+                await driver.close()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Error closing graphiti driver: {e}")
+        finally:
+            reset_graphiti_client()
+
+
+@pytest_asyncio.fixture
+async def async_client(graphiti_for_api_test):
+    """
+    Create async HTTP client for testing API with Graphiti dependency override.
+    
+    This ensures API endpoints use the per-test Graphiti instance, avoiding
+    event loop conflicts.
+    """
+    from app import app, get_graphiti_dep
+    
+    # Override Graphiti dependency with per-test instance
+    async def _override():
+        return graphiti_for_api_test
+    
+    app.dependency_overrides[get_graphiti_dep] = _override
     
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
+    
+    # Clear overrides after test
+    app.dependency_overrides.clear()
 
 
 @pytest.mark.asyncio
