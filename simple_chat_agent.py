@@ -40,6 +40,18 @@ class SimpleChatAgent:
         """
         self.llm_client = llm_client
         self.memory = memory
+        # Per-event-loop locks to avoid loop conflicts
+        self._write_lock_by_loop: dict[int, asyncio.Lock] = {}
+    
+    def _get_write_lock(self) -> asyncio.Lock:
+        """Get a write lock for the current event loop."""
+        loop = asyncio.get_running_loop()
+        key = id(loop)
+        lock = self._write_lock_by_loop.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._write_lock_by_loop[key] = lock
+        return lock
 
     async def answer(self, user_message: str) -> str:
         """
@@ -286,7 +298,7 @@ Please provide a helpful response based on the available context."""
                     # Capture turn_index from outer scope (atomically allocated)
                     captured_turn_index = turn_index
                     try:
-                        from core.graphiti_client import get_graphiti_client, get_write_semaphore
+                        from core.graphiti_client import get_graphiti_client
                         from knowledge.ingest import update_episode_metadata
                         from core.authorship import attach_author
 
@@ -294,12 +306,12 @@ Please provide a helpful response based on the available context."""
                         graphiti = await graphiti_client.ensure_ready()
 
                         # Use pre-allocated turn_index (atomic, safe under concurrency)
-
-                        write_semaphore = get_write_semaphore()
+                        # Use per-loop lock to avoid event loop conflicts
+                        write_lock = self._get_write_lock()
                         
                         # Add timeout around write operation (30 seconds) - Python 3.10 compatible
                         async def _do_write():
-                            async with write_semaphore:
+                            async with write_lock:
                                 from pydantic import ValidationError
                                 try:
                                     result = await with_rate_limit_retry(
@@ -427,7 +439,7 @@ Please provide a helpful response based on the available context."""
                     async def _async_summarize():
                         temp_op_id = str(uuid.uuid4())[:8]
                         try:
-                            from core.graphiti_client import get_graphiti_client, get_write_semaphore
+                            from core.graphiti_client import get_graphiti_client
                             from knowledge.ingest import update_episode_metadata
                             from core.authorship import attach_author
 
@@ -442,12 +454,13 @@ Please provide a helpful response based on the available context."""
                             graphiti_client = get_graphiti_client()
                             graphiti = await graphiti_client.ensure_ready()
 
-                            write_semaphore = get_write_semaphore()
+                            # Use per-loop lock to avoid event loop conflicts
+                            write_lock = self._get_write_lock()
                             summary_uuid = None
                             
                             # Add timeout around write operation (30 seconds) - Python 3.10 compatible
                             async def _do_write_summary():
-                                async with write_semaphore:
+                                async with write_lock:
                                     from pydantic import ValidationError
                                     try:
                                         result = await with_rate_limit_retry(
