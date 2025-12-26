@@ -26,7 +26,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from graphiti_core import Graphiti
 
-from simple_agent import SimpleAgent
+# SimpleAgent removed - using bootstrap for initialization
+from core.bootstrap import ensure_graphiti_ready
 from core.config import get_config
 from core.graphiti_client import get_graphiti_client
 from core.conversation_buffer import clear_user_buffer
@@ -172,7 +173,7 @@ app = FastAPI(
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-agent = SimpleAgent()
+# Initialization state - using bootstrap instead of SimpleAgent
 _init_lock = asyncio.Lock()
 _initialized = False
 
@@ -275,12 +276,17 @@ async def _link_user(graphiti, fp: str, user_id: str):
 
 
 async def ensure_agent_ready():
+    """
+    Ensure Graphiti is initialized and user identity is seeded.
+    Replaces old SimpleAgent.initialize() logic.
+    """
     global _initialized
     if _initialized:
         return
     async with _init_lock:
         if not _initialized:
-            await agent.initialize()
+            # Initialize Graphiti
+            await ensure_graphiti_ready()
             # Seed identity
             try:
                 await ensure_user_identity_entity("sergey")
@@ -644,8 +650,9 @@ async def delete_node(req: DeleteRequest):
     await ensure_agent_ready()
     uuid = req.uuid
     hard = req.hard
+    graphiti = await get_graphiti_dep()
     try:
-        driver = agent.graphiti.driver
+        driver = graphiti.driver
         if hard:
             res = await driver.execute_query(
                 "MATCH (n {uuid:$uuid}) DETACH DELETE n RETURN 1 AS done",
@@ -714,8 +721,9 @@ async def clear_memory():
     WARNING: This is destructive and cannot be undone.
     """
     await ensure_agent_ready()
+    graphiti = await get_graphiti_dep()
     try:
-        driver = agent.graphiti.driver
+        driver = graphiti.driver
         # Удаляем все узлы и связи
         result = await driver.execute_query(
             "MATCH (n) DETACH DELETE n RETURN count(n) AS deleted_count"
@@ -758,8 +766,9 @@ async def experience_ingest(req: ExperienceIngestRequest):
     Used for tracking work patterns and learning from past experiences.
     """
     await ensure_agent_ready()
+    graphiti = await get_graphiti_dep()
     try:
-        return await ingest_experience(agent.graphiti, req)
+        return await ingest_experience(graphiti, req)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -776,9 +785,10 @@ async def experience_success(
     Returns patterns that led to successful outcomes.
     """
     await ensure_agent_ready()
+    graphiti = await get_graphiti_dep()
     try:
         items = await get_success_patterns(
-            agent.graphiti, task_type=task_type, context_hash=context_hash, limit=limit
+            graphiti, task_type=task_type, context_hash=context_hash, limit=limit
         )
         return {"items": items}
     except Exception as exc:  # noqa: BLE001
@@ -797,9 +807,10 @@ async def experience_antipatterns(
     Returns patterns that led to failures or problems.
     """
     await ensure_agent_ready()
+    graphiti = await get_graphiti_dep()
     try:
         items = await get_antipatterns(
-            agent.graphiti, task_type=task_type, context_hash=context_hash, limit=limit
+            graphiti, task_type=task_type, context_hash=context_hash, limit=limit
         )
         return {"items": items}
     except Exception as exc:  # noqa: BLE001
@@ -846,11 +857,12 @@ async def diagnose_memory_conflicts(
     Finds conflicting information and correction episodes.
     """
     await ensure_agent_ready()
+    graphiti = await get_graphiti_dep()
     try:
         import logging
         logger = logging.getLogger(__name__)
 
-        driver = agent.graphiti.driver
+        driver = graphiti.driver
 
         # 1) Все сущности с именем, содержащим entity_name
         entities_query = """
