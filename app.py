@@ -26,7 +26,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from graphiti_core import Graphiti
 
-# SimpleAgent removed - using bootstrap for initialization
 from core.bootstrap import ensure_graphiti_ready
 from core.config import get_config
 from core.graphiti_client import get_graphiti_client
@@ -173,7 +172,6 @@ app = FastAPI(
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-# Initialization state - using bootstrap instead of SimpleAgent
 _init_lock = asyncio.Lock()
 _initialized = False
 
@@ -278,7 +276,6 @@ async def _link_user(graphiti, fp: str, user_id: str):
 async def ensure_agent_ready():
     """
     Ensure Graphiti is initialized and user identity is seeded.
-    Replaces old SimpleAgent.initialize() logic.
     """
     global _initialized
     if _initialized:

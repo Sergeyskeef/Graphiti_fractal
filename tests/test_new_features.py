@@ -51,7 +51,6 @@ sys.modules["graphiti_core.models.nodes.node_db_queries"] = mock_queries
 from scripts.apply_patches import apply_patches
 from knowledge.ingest import remember_text, find_similar_episode
 from scripts.consolidate import consolidate_l3_memory
-# SimpleAgent removed - using MemoryOps for memory operations instead
 from core.memory_ops import MemoryOps
 
 # --- Test 1: Verify Patching ---
@@ -145,18 +144,8 @@ async def test_l3_consolidation():
 
     print("\n✅ Test 3: L3 Consolidation flow works")
 
-# --- Test 4: Adaptive Search (MemoryOps) ---
-# NOTE: SimpleAgent removed - this test now uses MemoryOps directly
-@pytest.mark.asyncio
-async def test_adaptive_search_priority():
-    # This test was for SimpleAgent's adaptive search
-    # Since SimpleAgent is removed, we skip this test or rewrite it for MemoryOps
-    # For now, we'll skip it as the functionality is covered by other tests
-    pytest.skip("SimpleAgent removed - adaptive search functionality moved to MemoryOps")
-    
-    # If needed, rewrite using MemoryOps:
-    # memory = MemoryOps(mock_graphiti, "test_user")
-    # context = await memory.build_context_for_query("What happened?")
+# Test 4 removed: test_adaptive_search_priority() was testing SimpleAgent's adaptive search.
+# Functionality is covered by other tests (test_memory_ops, test_search_memory, test_integration).
 
 if __name__ == "__main__":
     # Manually run async tests if executed as script
@@ -165,5 +154,5 @@ if __name__ == "__main__":
     test_apply_patches_fixes_string()
     loop.run_until_complete(test_semantic_deduplication())
     loop.run_until_complete(test_l3_consolidation())
-    loop.run_until_complete(test_adaptive_search_priority())
+    # test_adaptive_search_priority() removed (SimpleAgent deleted)
     loop.close()

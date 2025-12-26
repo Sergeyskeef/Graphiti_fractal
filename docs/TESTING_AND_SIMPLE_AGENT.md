@@ -196,7 +196,14 @@ OCCURS_AT              1
 2. ✅ Может извлекать контекст
 3. ✅ Может отвечать с учётом памяти
 
-### Файл: `simple_agent.py`
+### ⚠️ УСТАРЕЛО: Файл `simple_agent.py` был удален
+
+**Примечание:** `simple_agent.py` больше не существует. Используйте:
+- `SimpleChatAgent` для чата (см. `simple_chat_agent.py`)
+- `MemoryOps` для операций с памятью (см. `core/memory_ops.py`)
+- API эндпойнт `/chat` для тестирования через HTTP
+
+### Устаревший код (только для справки): `simple_agent.py`
 
 ```python
 #!/usr/bin/env python3
@@ -441,7 +448,8 @@ docker ps | grep neo4j
 python main.py seed
 
 # 3. Запусти агент
-python simple_agent.py
+# УСТАРЕЛО: python simple_agent.py (файл удален)
+# Используйте: curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"message": "test", "user_id": "test"}'
 ```
 
 ### Ожидаемый Вывод
@@ -525,7 +533,8 @@ pwd  # должно быть fractal_memory_v2/
 pip install -r requirements.txt
 
 # Проверь путь
-PYTHONPATH=. python simple_agent.py
+PYTHONPATH=. # УСТАРЕЛО: python simple_agent.py (файл удален)
+# Используйте: curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"message": "test", "user_id": "test"}'
 ```
 
 ---
