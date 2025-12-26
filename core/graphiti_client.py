@@ -16,12 +16,24 @@ logger = logging.getLogger(__name__)
 
 class CustomEmbedder(EmbedderClient):
     """Custom embedder that uses our get_embedding function with caching."""
+    @staticmethod
+    def _fallback_vector(dim: int = 1536) -> list[float]:
+        """
+        Neo4j vector.similarity.cosine() rejects a zero-norm vector.
+        Return a small non-zero vector to keep search functional in degraded mode.
+        """
+        if dim <= 0:
+            return [1e-6]
+        vec = [0.0] * dim
+        vec[0] = 1e-6
+        return vec
+
     async def create(self, input_data):
         if isinstance(input_data, str):
             result = await get_embedding(input_data)
             if not result:
                 logger.warning(f"Empty embedding for string input '{input_data[:50]}...', returning zeros")
-                return [0.0] * 1536
+                return self._fallback_vector(1536)
             return result
         elif isinstance(input_data, list) and all(isinstance(x, str) for x in input_data):
             # Average embeddings for list of strings
@@ -33,13 +45,13 @@ class CustomEmbedder(EmbedderClient):
 
             if not vecs:
                 logger.warning(f"No valid embeddings for list input {len(input_data)} strings, returning zeros")
-                return [0.0] * 1536
+                return self._fallback_vector(1536)
 
             # Element-wise average
             return [sum(vals) / len(vals) for vals in zip(*vecs)]
         else:
             logger.error(f"Unsupported input type for CustomEmbedder: {type(input_data)} (value: {input_data!r})")
-            return [0.0] * 1536
+            return self._fallback_vector(1536)
 
     async def create_batch(self, input_data_list):
         results = []
