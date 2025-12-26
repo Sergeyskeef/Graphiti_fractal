@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fractal Memory Console</title>
+    
+    <!-- Подключаем React и ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Подключаем Babel для JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Подключаем Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Настройка темы Tailwind -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        slate: { 850: '#151e2e', 950: '#020617' },
+                        cyan: { 450: '#18a3b8' } // Custom accent
+                    },
+                    animation: {
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    }
+                }
+            }
+        }
+    </script>
+    
+  <style>
+        /* Скроллбар в стиле киберпанк */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+        body { background-color: #020617; color: #e2e8f0; }
+  </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- ICONS (SVG Components to avoid external dependencies) ---
+        const Icon = ({ path, size = 20, className = "" }) => (
+            <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+                {path}
+            </svg>
+        );
+
+        const Icons = {
+            Cpu: <path d="M12 2v2M12 20v2M20 12h2M2 12h2M5.6 5.6l1.4 1.4M18.4 18.4l-1.4-1.4M4 4l2 2M16 16l2 2M8 2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zM16 2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zM8 16a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2zM16 16a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2z" />,
+            Send: <path d="m22 2-7 20-4-9-9-4Z M22 2 11 13" />,
+            Mic: <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z M19 10v2a7 7 0 0 1-14 0v-2 M12 19v4 M8 23h8" />,
+            Stop: <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />,
+            Upload: <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M17 8l-5-5-5 5 M12 3v12" />,
+            FileText: <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z M14 2v6h6" />,
+            Activity: <path d="M22 12h-4l-3 9L9 3l-3 9H2" />,
+            Maximize2: <path d="M15 3h6v6 M9 21H3v-6 M21 3l-7 7 M3 21l7-7" />,
+            Trash2: <path d="M3 6h18 M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6 M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2 M10 11v6 M14 11v6" />,
+            Paperclip: <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+        };
+
+        const IconComp = ({ name, ...props }) => <Icon path={Icons[name] || Icons.Cpu} {...props} />;
+
+        // --- MAIN APP COMPONENT ---
+        function App() {
+            // State: Chat
+            const [messages, setMessages] = useState([]);
+            const [inputValue, setInputValue] = useState('');
+            const [isSending, setIsSending] = useState(false);
+            
+            // State: Audio
+            const [isRecording, setIsRecording] = useState(false);
+            const [isTranscribing, setIsTranscribing] = useState(false);
+            const mediaRecorderRef = useRef(null);
+            const audioChunksRef = useRef([]);
+            const audioStreamRef = useRef(null);
+
+            // State: Sidebar
+            const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+            const [activeTab, setActiveTab] = useState('text');
+
+            // State: Forms
+            const [memText, setMemText] = useState('');
+            const [memSource, setMemSource] = useState('');
+            const [memType, setMemType] = useState('knowledge');
+            const [uploadFile, setUploadFile] = useState(null);
+            const [uploadSource, setUploadSource] = useState('');
+            const [isUploading, setIsUploading] = useState(false);
+            const [uploadProgress, setUploadProgress] = useState(0);
+            const [uploadStatus, setUploadStatus] = useState('');
+
+            const messagesEndRef = useRef(null);
+            const fileInputRef = useRef(null);
+            const textareaRef = useRef(null); // Ref for auto-resizing textarea
+
+            // Auto-scroll
+            useEffect(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, [messages]);
+
+            // Auto-resize textarea
+            useEffect(() => {
+                if (textareaRef.current) {
+                    textareaRef.current.style.height = 'auto'; // Reset height to recalculate
+                    textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 128) + 'px'; // Grow up to 128px
+                }
+            }, [inputValue]);
+
+            // Autofocus input on load
+            useEffect(() => {
+                requestAnimationFrame(() => textareaRef.current?.focus());
+            }, []);
+
+            const focusInput = () => {
+                requestAnimationFrame(() => {
+                    const el = textareaRef.current;
+                    if (!el) return;
+                    el.focus();
+                    // Put cursor to end by default
+                    const pos = el.value?.length ?? 0;
+                    try { el.setSelectionRange(pos, pos); } catch (e) {}
+                });
+            };
+
+            const insertTextAtCursor = (text) => {
+                const el = textareaRef.current;
+                const insertion = (text || '').trim();
+                if (!insertion) return;
+                if (!el) {
+                    setInputValue(prev => (prev ? prev + ' ' : '') + insertion);
+                    return;
+                }
+                const start = el.selectionStart ?? inputValue.length;
+                const end = el.selectionEnd ?? inputValue.length;
+                setInputValue(prev => {
+                    const before = prev.slice(0, start);
+                    const after = prev.slice(end);
+                    const spacer = before && !before.endsWith(' ') ? ' ' : '';
+                    const tailSpacer = after && !insertion.endsWith(' ') ? ' ' : '';
+                    return before + spacer + insertion + tailSpacer + after;
+                });
+                requestAnimationFrame(() => {
+                    el.focus();
+                    const pos = start + insertion.length + 1; // approximate; OK for UX
+                    try { el.setSelectionRange(pos, pos); } catch (e) {}
+                });
+            };
+
+            // --- CHAT LOGIC ---
+            const handleSendMessage = async (e) => {
+                e?.preventDefault();
+                if (!inputValue.trim()) return;
+
+                const userText = inputValue;
+                setInputValue('');
+                addMessage('user', userText);
+                setIsSending(true);
+                focusInput();
+
+      try {
+        const res = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message: userText, user_id: 'sergey' }),
+                    });
+                    
+                    if (!res.ok) {
+                        const errText = await res.text();
+                        throw new Error(errText || `HTTP ${res.status}`);
+                    }
+                    const data = await res.json();
+                    
+                    addMessage('bot', data.reply, data.timing);
+                } catch (err) {
+                    addMessage('system', `Ошибка: ${err.message}`);
+                } finally {
+                    setIsSending(false);
+                    focusInput();
+                }
+            };
+            
+            // Handle Enter key in Textarea
+            const handleKeyDown = (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendMessage(e);
+                }
+            };
+
+            const addMessage = (role, text, metrics = null) => {
+                setMessages(prev => [...prev, { id: Date.now(), role, text, metrics }]);
+            };
+
+            // --- AUDIO LOGIC ---
+            const startRecording = async () => {
+                try {
+                    // Browser security: getUserMedia works only in secure contexts (https or localhost).
+                    if (!window.isSecureContext) {
+                        alert(
+                            "Голосовой ввод недоступен: страница открыта не в безопасном контексте (HTTPS).\n\n" +
+                            "Как исправить:\n" +
+                            "- Открой через HTTPS (рекомендуется)\n" +
+                            "- Или открой UI на localhost (если браузер запущен на той же машине)\n\n" +
+                            "Текущее открытие по HTTP на внешнем IP обычно блокирует микрофон в Chrome/Edge."
+                        );
+                        return;
+                    }
+                    if (!navigator?.mediaDevices?.getUserMedia) {
+                        alert(
+                            "Голосовой ввод недоступен: браузер не поддерживает navigator.mediaDevices.getUserMedia.\n\n" +
+                            "Проверь:\n" +
+                            "- что ты в Chrome/Edge актуальной версии\n" +
+                            "- что страница открыта по HTTPS\n" +
+                            "- что микрофон доступен системе и разрешения выданы"
+                        );
+                        return;
+                    }
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    audioStreamRef.current = stream;
+                    const mediaRecorder = new MediaRecorder(stream);
+                    mediaRecorderRef.current = mediaRecorder;
+                    audioChunksRef.current = [];
+
+                    mediaRecorder.ondataavailable = (event) => {
+                        if (event.data.size > 0) audioChunksRef.current.push(event.data);
+                    };
+
+                    mediaRecorder.onstop = handleAudioStop;
+                    mediaRecorder.start();
+                    setIsRecording(true);
+                } catch (err) {
+                    alert("Ошибка доступа к микрофону: " + (err?.message || String(err)));
+                }
+            };
+
+            const stopRecording = () => {
+                if (mediaRecorderRef.current && isRecording) {
+                    mediaRecorderRef.current.stop();
+                    setIsRecording(false);
+                }
+            };
+
+            const handleAudioStop = async () => {
+                const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' }); // или wav
+
+                // Stop tracks to release mic
+                try {
+                    audioStreamRef.current?.getTracks?.().forEach(t => t.stop());
+                } catch (e) {}
+                audioStreamRef.current = null;
+                
+                // Отправляем на сервер
+                const formData = new FormData();
+                formData.append("file", audioBlob, "voice_message.webm");
+                setIsTranscribing(true);
+
+                try {
+                    // /transcribe returns { text }
+                    const res = await fetch('/transcribe', { 
+                        method: 'POST', 
+                        body: formData 
+                    });
+                    
+                    if (!res.ok) {
+                        const errText = await res.text();
+                        throw new Error(errText || "Ошибка транскрибации");
+                    }
+                    
+        const data = await res.json();
+                    if (data?.text) {
+                        insertTextAtCursor(data.text);
+                        focusInput();
+                    }
+      } catch (err) {
+                    addMessage('system', "Ошибка обработки аудио: " + err.message);
+      } finally {
+                    setIsTranscribing(false);
+                }
+            };
+
+            // --- MEMORY LOGIC ---
+            const handleRemember = async () => {
+                if (!memText.trim()) return;
+                setUploadStatus('Сохранение...');
+                try {
+                    const res = await fetch('/remember', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            text: memText, 
+                            source_description: memSource || 'manual', 
+                            memory_type: memType,
+                            user_id: 'sergey'
+                        })
+                    });
+                    if (!res.ok) {
+                        const errText = await res.text();
+                        throw new Error(errText || `HTTP ${res.status}`);
+                    }
+                    setUploadStatus('✅ Сохранено');
+                    setMemText('');
+                    setTimeout(() => setUploadStatus(''), 3000);
+                } catch (err) {
+                    setUploadStatus(`❌ Ошибка: ${err.message}`);
+                }
+            };
+
+            const handleClearMemory = async () => {
+                if (!confirm('Точно удалить ВСЕ воспоминания?')) return;
+                try {
+                    const res = await fetch('/clear_memory', { method: 'POST' });
+                    if (!res.ok) {
+                        const errText = await res.text();
+                        throw new Error(errText || `HTTP ${res.status}`);
+                    }
+                    const data = await res.json();
+                    alert(`Память очищена. Удалено узлов: ${data.deleted_nodes}`);
+                    setMessages([]);
+                } catch (e) { alert(e.message); }
+            };
+
+            const handleClearBuffer = async () => {
+                try {
+                    const res = await fetch('/buffer/clear', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: 'sergey' }) 
+                    });
+                    if (!res.ok) {
+                        const errText = await res.text();
+                        throw new Error(errText || `HTTP ${res.status}`);
+                    }
+                    const data = await res.json();
+                    setMessages([]);
+                    setUploadStatus('Буфер очищен');
+                    setTimeout(() => setUploadStatus(''), 3000);
+                } catch (e) {
+                    setUploadStatus('Ошибка: ' + e.message);
+                }
+            };
+
+            // --- FILE UPLOAD LOGIC ---
+            const pollJobStatus = (jobId) => {
+                const interval = setInterval(async () => {
+                    try {
+                        const res = await fetch(`/upload/status/${jobId}`);
+                        if(!res.ok) {
+                            clearInterval(interval);
+                            setIsUploading(false);
+                            const errText = await res.text();
+                            setUploadStatus(`❌ Ошибка: ${errText || res.status}`);
+                            return;
+                        }
+                        const status = await res.json();
+
+                        let pct = 10;
+                        if(status.stage === 'ingest') pct = 50;
+                        if(status.stage === 'done') pct = 100;
+                        
+                        setUploadProgress(pct);
+                        setUploadStatus(`Статус: ${status.stage}`);
+
+                        if(status.stage === 'done' || status.stage === 'error') {
+                            clearInterval(interval);
+                            setIsUploading(false);
+                            if(status.stage === 'done') setUploadStatus('✅ Готово!');
+                            else setUploadStatus(`❌ ${status.error}`);
+                        }
+                    } catch(e) { console.error(e); }
+                }, 1000);
+            };
+
+            const handleUpload = async () => {
+                if (!uploadFile) return;
+                setIsUploading(true);
+                setUploadStatus('Загрузка...');
+                
+                const fd = new FormData();
+                fd.append('file', uploadFile);
+                fd.append('source_description', uploadSource || uploadFile.name);
+                fd.append('memory_type', memType);
+                fd.append('user_id', 'sergey');
+
+                try {
+                    const res = await fetch('/upload', { method: 'POST', body: fd });
+                    if(!res.ok) {
+                        const errText = await res.text();
+                        throw new Error(errText || `HTTP ${res.status}`);
+                    }
+                    const data = await res.json();
+                    
+                    if (data.job_id) {
+                        pollJobStatus(data.job_id);
+                    } else {
+                        setUploadProgress(100);
+                        setIsUploading(false);
+                        setUploadStatus('✅ Загружено');
+                    }
+                } catch (err) {
+                    setIsUploading(false);
+                    setUploadStatus(`Ошибка: ${err.message}`);
+                }
+            };
+
+            // --- UI COMPONENTS ---
+            return (
+                <div className="flex h-screen overflow-hidden text-sm md:text-base">
+                    {/* MAIN CHAT */}
+                    <div className="flex-1 flex flex-col relative min-w-0">
+                        {/* HEADER */}
+                        <header className="h-16 bg-slate-900/80 border-b border-slate-800 flex items-center justify-between px-6 backdrop-blur">
+                            <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 rounded bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-white shadow-lg shadow-cyan-500/20">
+                                    <IconComp name="Cpu" size={18} />
+                                </div>
+                                <div>
+                                    <h1 className="font-bold text-white leading-none">Fractal Memory</h1>
+                                    <span className="text-xs text-slate-400">Agent Console v2.0</span>
+                                </div>
+                            </div>
+                            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 text-slate-400 hover:text-white transition">
+                                <IconComp name="Maximize2" />
+                            </button>
+                        </header>
+
+                        {/* MESSAGES */}
+                        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                            {messages.length === 0 && (
+                                <div className="h-full flex flex-col items-center justify-center text-slate-600">
+                                    <IconComp name="Activity" size={48} className="mb-4 opacity-50" />
+                                    <p>Система готова. Начните диалог.</p>
+                                </div>
+                            )}
+                            {messages.map(msg => (
+                                <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                    <div className={`max-w-[80%] p-4 rounded-2xl shadow-md ${
+                                        msg.role === 'user' 
+                                            ? 'bg-blue-600 text-white rounded-tr-none' 
+                                            : msg.role === 'system'
+                                            ? 'bg-red-900/40 border border-red-800 text-red-200'
+                                            : 'bg-slate-800 text-slate-200 border border-slate-700 rounded-tl-none'
+                                    }`}>
+                                        <div className="whitespace-pre-wrap">{msg.text}</div>
+                                        {msg.metrics && (
+                                            <div className="mt-2 pt-2 border-t border-white/10 text-[10px] opacity-60 flex gap-2">
+                                                {msg.metrics.answer_ms && <span>Gen: {Math.round(msg.metrics.answer_ms)}ms</span>}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                            <div ref={messagesEndRef} />
+                        </div>
+
+                        {/* INPUT AREA */}
+                        <div className="p-4 bg-slate-950 border-t border-slate-800">
+                            <form onSubmit={handleSendMessage} className="max-w-4xl mx-auto flex items-end gap-3 bg-slate-900 p-2 rounded-xl border border-slate-800 focus-within:border-cyan-500/50 transition-colors">
+                                <button 
+                                    type="button"
+                                    onClick={isRecording ? stopRecording : startRecording}
+                                    disabled={isSending || isTranscribing}
+                                    className={`p-3 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${isRecording ? 'bg-red-500 text-white animate-pulse' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+                                >
+                                    <IconComp name={isRecording ? "Stop" : "Mic"} />
+                                </button>
+                                
+                                <textarea 
+                                    ref={textareaRef}
+                                    className="flex-1 bg-transparent border-none focus:ring-0 text-white placeholder-slate-500 py-3 min-h-[44px] max-h-32 resize-none overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent"
+                                    placeholder={isRecording ? "Говорите..." : (isTranscribing ? "Распознаю речь..." : "Сообщение...")}
+                                    value={inputValue}
+                                    onChange={e => setInputValue(e.target.value)}
+                                    onKeyDown={handleKeyDown}
+                                    disabled={isRecording}
+                                    rows={1}
+                                />
+                                
+                                <button
+                                    type="submit"
+                                    disabled={!inputValue.trim() || isSending || isRecording || isTranscribing}
+                                    className="p-3 bg-blue-600 text-white rounded-lg hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                                >
+                                    <IconComp name="Send" />
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    {/* SIDEBAR */}
+                    {isSidebarOpen && (
+                        <div className="w-80 md:w-96 bg-slate-900 border-l border-slate-800 flex flex-col shrink-0 transition-all">
+                            {/* TABS */}
+                            <div className="flex border-b border-slate-800">
+                                {['text', 'file', 'graph'].map(tab => (
+                                    <button 
+                                        key={tab}
+                                        onClick={() => setActiveTab(tab)}
+                                        className={`flex-1 py-3 text-sm font-medium border-b-2 transition-colors ${
+                                            activeTab === tab ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500 hover:text-slate-300'
+                                        }`}
+                                    >
+                                        {tab === 'text' && 'Факты'}
+                                        {tab === 'file' && 'Файл'}
+                                        {tab === 'graph' && 'Граф'}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* CONTENT */}
+                            <div className="flex-1 p-5 overflow-y-auto">
+                                <div className="mb-4">
+                                    <label className="text-xs text-slate-500 font-bold uppercase block mb-1">Тип памяти</label>
+                                    <select 
+                                        value={memType} onChange={e => setMemType(e.target.value)}
+                                        className="w-full bg-slate-800 border border-slate-700 text-slate-200 rounded p-2 text-sm focus:border-cyan-500 outline-none"
+                                    >
+                                        <option value="knowledge">📚 Общие знания</option>
+                                        <option value="project">📁 Проект</option>
+                                        <option value="personal">🧑 Личное</option>
+                                    </select>
+                                </div>
+
+                                {activeTab === 'text' && (
+                                    <div className="space-y-4 fade-in">
+                                        <textarea 
+                                            className="w-full h-32 bg-slate-800 border border-slate-700 rounded p-3 text-slate-200 text-sm focus:border-cyan-500 outline-none resize-none"
+                                            placeholder="Введите факт, который агент должен запомнить..."
+                                            value={memText} onChange={e => setMemText(e.target.value)}
+                                        ></textarea>
+                                        <input 
+                                            className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-sm text-slate-200"
+                                            placeholder="Источник (опционально)"
+                                            value={memSource} onChange={e => setMemSource(e.target.value)}
+                                        />
+                                        <button onClick={handleRemember} className="w-full py-2 bg-cyan-600 text-white rounded hover:bg-cyan-500 transition">Запомнить</button>
+                                    </div>
+                                )}
+
+                                {activeTab === 'file' && (
+                                    <div className="space-y-4 fade-in">
+                                        <div 
+                                            className="border-2 border-dashed border-slate-700 hover:border-cyan-500 hover:bg-slate-800 rounded-lg p-6 text-center cursor-pointer transition"
+                                            onClick={() => fileInputRef.current?.click()}
+                                        >
+                                            <input type="file" ref={fileInputRef} className="hidden" onChange={e => setUploadFile(e.target.files[0])} />
+                                            {uploadFile ? (
+                                                <div className="text-cyan-400 font-medium truncate">{uploadFile.name}</div>
+                                            ) : (
+                                                <div className="text-slate-500 text-sm">Нажмите для выбора файла<br/>(.txt, .md)</div>
+                                            )}
+                                        </div>
+                                        <button 
+                                            onClick={handleUpload} 
+                                            disabled={!uploadFile || isUploading}
+                                            className="w-full py-2 bg-purple-600 text-white rounded hover:bg-purple-500 disabled:opacity-50 transition"
+                                        >
+                                            {isUploading ? 'Загрузка...' : 'Загрузить в базу'}
+                                        </button>
+                                        {isUploading && (
+                                            <div className="h-1 bg-slate-800 rounded overflow-hidden">
+                                                <div className="h-full bg-purple-500 transition-all" style={{width: `${uploadProgress}%`}}></div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {activeTab === 'graph' && (
+                                    <div className="text-center space-y-4 fade-in">
+                                        <div className="p-4 bg-slate-800 rounded-lg border border-slate-700">
+                                            <p className="text-sm text-slate-400 mb-3">Визуализация графа открывается в отдельном окне для лучшей производительности.</p>
+                                            <a href="/visualization.html" target="_blank" className="inline-flex items-center gap-2 text-emerald-400 hover:text-emerald-300 font-medium">
+                                                <IconComp name="Activity" size={16} /> Открыть Граф
+                                            </a>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {uploadStatus && <div className="mt-4 p-3 bg-slate-800 rounded text-xs text-center text-slate-300">{uploadStatus}</div>}
+                                
+                                <div className="mt-8 pt-6 border-t border-slate-800 grid grid-cols-2 gap-2">
+                                    <button onClick={handleClearBuffer} className="flex items-center justify-center gap-2 py-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded text-sm transition">
+                                        <IconComp name="Trash2" size={14} /> Очистить буфер
+                                    </button>
+                                    <button onClick={handleClearMemory} className="flex items-center justify-center gap-2 py-2 text-red-500 hover:bg-red-950/30 rounded text-sm transition">
+                                        <IconComp name="Trash2" size={14} /> Очистить память
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+  </script>
+</body>
+</html>
