@@ -5,6 +5,7 @@ Tests the FastAPI endpoints with real dependencies.
 """
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 import os
 
@@ -16,7 +17,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def async_client():
     """Create async HTTP client for testing API."""
     from app import app

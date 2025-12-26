@@ -13,29 +13,35 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture
 async def graphiti_client():
     """
     Get Graphiti client for integration tests.
     
-    Session-scoped to reuse the same Neo4j driver across all tests.
-    In strict mode, pytest-asyncio manages the event loop automatically.
+    Function-scoped: creates a new client for each test to avoid event loop conflicts.
+    This ensures Neo4j async driver is bound to the correct event loop for each test.
     """
-    from core.graphiti_client import get_graphiti_client
+    from core.graphiti_client import get_graphiti_client, reset_graphiti_client
     
-    client = get_graphiti_client()
+    # Create a new client instance (not singleton) for this test
+    client = get_graphiti_client(force_new=True)
     graphiti = await client.ensure_ready()
-    yield graphiti
     
-    # Cleanup: close Neo4j driver to avoid event loop conflicts
     try:
-        driver = getattr(graphiti, 'driver', None)
-        if driver and hasattr(driver, 'close'):
-            await driver.close()
-    except Exception as e:
-        # Log but don't fail on cleanup errors
-        import logging
-        logging.getLogger(__name__).warning(f"Error closing graphiti driver: {e}")
+        yield graphiti
+    finally:
+        # Cleanup: close Neo4j driver and reset singleton
+        try:
+            driver = getattr(graphiti, 'driver', None)
+            if driver and hasattr(driver, 'close'):
+                await driver.close()
+        except Exception as e:
+            # Log but don't fail on cleanup errors
+            import logging
+            logging.getLogger(__name__).warning(f"Error closing graphiti driver: {e}")
+        finally:
+            # Reset singleton so next test gets a fresh client
+            reset_graphiti_client()
 
 
 @pytest_asyncio.fixture

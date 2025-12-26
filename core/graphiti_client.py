@@ -241,9 +241,32 @@ class GraphitiClient:
 # Write semaphore for Graphiti operations (limit concurrent writes)
 WRITE_SEMAPHORE = asyncio.Semaphore(2)  # Максимум 2 одновременные записи
 
-@lru_cache(maxsize=1)
-def get_graphiti_client() -> GraphitiClient:
-    """Единственный инстанс GraphitiClient на процесс."""
+# Global singleton cache (for production use)
+_graphiti_singleton: GraphitiClient | None = None
+
+
+def reset_graphiti_client() -> None:
+    """Reset the global Graphiti client singleton (useful for tests)."""
+    global _graphiti_singleton
+    _graphiti_singleton = None
+    # Also clear lru_cache if it exists
+    if hasattr(get_graphiti_client, 'cache_clear'):
+        get_graphiti_client.cache_clear()
+
+
+def get_graphiti_client(*, force_new: bool = False) -> GraphitiClient:
+    """
+    Get Graphiti client instance.
+    
+    Args:
+        force_new: If True, create a new client instance instead of reusing singleton.
+                   Useful for tests to avoid event loop conflicts.
+    
+    Returns:
+        GraphitiClient instance
+    """
+    global _graphiti_singleton
+    
     uri = os.getenv("NEO4J_URI")
     user = os.getenv("NEO4J_USER")
     password = os.getenv("NEO4J_PASSWORD")
@@ -251,11 +274,15 @@ def get_graphiti_client() -> GraphitiClient:
     if not all([uri, user, password]):
         raise RuntimeError("ENV vars NEO4J_URI/USER/PASSWORD are required")
 
-    return GraphitiClient(
-        uri=uri,
-        user=user,
-        password=password,
-    )
+    # If force_new or no singleton exists, create new client
+    if force_new or _graphiti_singleton is None:
+        _graphiti_singleton = GraphitiClient(
+            uri=uri,
+            user=user,
+            password=password,
+        )
+    
+    return _graphiti_singleton
 
 def get_write_semaphore() -> asyncio.Semaphore:
     """Получить семафор для операций записи."""

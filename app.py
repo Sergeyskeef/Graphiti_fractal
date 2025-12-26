@@ -416,11 +416,11 @@ async def chat(req: ChatRequest):
                 raise
 
         if config.memory.chat_save_episodes:
-        # Start background task with callback
-        task = asyncio.create_task(_store_conversation())
-        background_tasks.add(task)
-        task.add_done_callback(background_tasks.discard)
-        task.add_done_callback(_store_conversation_done)
+            # Start background task with callback
+            task = asyncio.create_task(_store_conversation())
+            background_tasks.add(task)
+            task.add_done_callback(background_tasks.discard)
+            task.add_done_callback(_store_conversation_done)
 
         duration_ms_total = (perf_counter() - t0) * 1000
         logger.info(
