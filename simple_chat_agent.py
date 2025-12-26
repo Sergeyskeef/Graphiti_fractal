@@ -276,8 +276,10 @@ Please provide a helpful response based on the available context."""
 
             # Allocate turn_index atomically BEFORE storing (needed for summary logic)
             # This ensures summary decision is based on atomic counter, not local buffer
+            from core.graphiti_client import get_graphiti_client
             from core.chat_persistence import allocate_turn_index
-            graphiti_temp = self.memory.graphiti
+            graphiti_client = get_graphiti_client()
+            graphiti_temp = await graphiti_client.ensure_ready()
             turn_index = await allocate_turn_index(
                 graphiti_temp,
                 self.memory.user_id,
@@ -291,11 +293,17 @@ Please provide a helpful response based on the available context."""
             def _store_chat_turn():
                 """Background task to store chat turn with pre-allocated turn_index."""
                 async def _async_store():
+                    temp_op_id = str(uuid.uuid4())[:8]
                     episode_uuid = None
                     # Capture turn_index from outer scope (atomically allocated)
                     captured_turn_index = turn_index
                     try:
-                        graphiti = self.memory.graphiti
+                        from core.graphiti_client import get_graphiti_client
+                        from knowledge.ingest import update_episode_metadata
+                        from core.authorship import attach_author
+
+                        graphiti_client = get_graphiti_client()
+                        graphiti = await graphiti_client.ensure_ready()
 
                         # Use pre-allocated turn_index (atomic, safe under concurrency)
                         # Use per-loop lock to avoid event loop conflicts
@@ -304,49 +312,41 @@ Please provide a helpful response based on the available context."""
                         # Add timeout around write operation (30 seconds) - Python 3.10 compatible
                         async def _do_write():
                             async with write_lock:
-                                # Chat persistence should not depend on Graphiti LLM/edge extraction.
-                                driver = graphiti.driver
-                                episode_uuid_local = str(uuid.uuid4())
-                                ts = datetime.now(timezone.utc).isoformat()
-                                res = await driver.execute_query(
-                                    """
-                                    MERGE (u:User {user_id: $user_id})
-                                    CREATE (e:Episodic {
-                                      uuid: $uuid,
-                                      name: $name,
-                                      content: $content,
-                                      group_id: $group_id,
-                                      created_at: $ts,
-                                      valid_at: $ts,
-                                      source: $source,
-                                      source_description: $source_description,
-                                      episode_kind: $episode_kind,
-                                      conversation_id: $conversation_id,
-                                      turn_index: $turn_index,
-                                      is_correction: $is_correction,
-                                      summarized: $summarized,
-                                      entity_edges: []
-                                    })
-                                    MERGE (u)-[:AUTHORED]->(e)
-                                    RETURN e.uuid AS uuid
-                                    """,
-                                    user_id=self.memory.user_id,
-                                    uuid=episode_uuid_local,
-                                    name="chat_turn",
-                                    content=conversation_text,
-                                    group_id="personal",
-                                    ts=ts,
-                                    source="text",
-                                    source_description="chat",
-                                    episode_kind="chat_turn",
-                                    conversation_id=conversation_id,
-                                    turn_index=captured_turn_index,
-                                    is_correction=is_correction_text(conversation_text),
-                                    summarized=False,
-                                )
-                                if res.records:
-                                    return res.records[0]["uuid"]
-                                return episode_uuid_local
+                                from pydantic import ValidationError
+                                try:
+                                    result = await with_rate_limit_retry(
+                                        lambda: graphiti.add_episode(
+                                            name="chat_turn",
+                                            episode_body=conversation_text,
+                                            source_description="chat",
+                                            reference_time=datetime.now(timezone.utc),
+                                            group_id="personal"
+                                        ),
+                                        op_name="add_episode:chat",
+                                        request_id=temp_op_id
+                                    )
+                                    # Handle return type
+                                    actual_episode = result.episode if hasattr(result, 'episode') else result
+                                    if isinstance(actual_episode, dict):
+                                        return actual_episode.get("uuid")
+                                    elif hasattr(actual_episode, "uuid"):
+                                        return actual_episode.uuid
+                                    else:
+                                        logger.error(f"Unknown return type from add_episode: {type(actual_episode)}")
+                                        return None
+                                except ValidationError as ve:
+                                    logger.error(f"Validation error during chat turn ingestion: {ve}")
+                                    # Try to recover UUID from Neo4j
+                                    driver = graphiti.driver
+                                    find_res = await driver.execute_query(
+                                        "MATCH (e:Episodic) WHERE e.content = $content RETURN e.uuid AS uuid LIMIT 1",
+                                        content=conversation_text
+                                    )
+                                    if find_res.records:
+                                        recovered_uuid = find_res.records[0]['uuid']
+                                        logger.info(f"Recovered chat turn UUID after ValidationError: {recovered_uuid}")
+                                        return recovered_uuid
+                                    return None
                         
                         try:
                             episode_uuid = await asyncio.wait_for(_do_write(), timeout=30.0)
@@ -358,8 +358,20 @@ Please provide a helpful response based on the available context."""
                             return
                         
                         if not episode_uuid:
-                            logger.error("No UUID returned from chat turn write")
+                            logger.error("No UUID returned from add_episode")
                             return
+
+                        # Attach author
+                        await attach_author(episode_uuid, self.memory.user_id)
+
+                        # Update metadata
+                        await update_episode_metadata(graphiti, episode_uuid, {
+                            "conversation_id": conversation_id,
+                            "turn_index": captured_turn_index,
+                            "episode_kind": "chat_turn",
+                            "is_correction": is_correction_text(conversation_text),
+                            "summarized": False
+                        })
 
                         # Self-check: verify metadata was updated
                         driver = graphiti.driver
@@ -371,7 +383,7 @@ Please provide a helpful response based on the available context."""
                                e.is_correction AS is_correction
                         LIMIT 1
                         """
-                        check_result = await driver.execute_query(check_query, uuid=episode_uuid)
+                        check_result = await driver.execute_query(check_query, {"uuid": episode_uuid})
                         if check_result.records:
                             record = check_result.records[0]
                             actual_conv_id = record.get("conversation_id")
@@ -425,16 +437,22 @@ Please provide a helpful response based on the available context."""
                 def _create_summary():
                     """Background task to create chat summary."""
                     async def _async_summarize():
+                        temp_op_id = str(uuid.uuid4())[:8]
                         try:
-                            graphiti = self.memory.graphiti
+                            from core.graphiti_client import get_graphiti_client
+                            from knowledge.ingest import update_episode_metadata
+                            from core.authorship import attach_author
 
                             # Get last 10 turns
                             last_turns = conversation_buffer.get_last_n_turns(10)
                             if not last_turns:
                                 return
 
-                            # Generate summary without external LLM dependency (deterministic fallback)
-                            summary_text = "Chat summary (auto):\n" + "\n\n".join(content for _, content in last_turns)
+                            # Generate summary
+                            summary_text = await _generate_chat_summary(last_turns)
+
+                            graphiti_client = get_graphiti_client()
+                            graphiti = await graphiti_client.ensure_ready()
 
                             # Use per-loop lock to avoid event loop conflicts
                             write_lock = self._get_write_lock()
@@ -443,47 +461,40 @@ Please provide a helpful response based on the available context."""
                             # Add timeout around write operation (30 seconds) - Python 3.10 compatible
                             async def _do_write_summary():
                                 async with write_lock:
-                                    driver = graphiti.driver
-                                    summary_uuid_local = str(uuid.uuid4())
-                                    ts = datetime.now(timezone.utc).isoformat()
-                                    covers = f"{max(1, turn_index-9)}-{turn_index}"
-                                    res = await driver.execute_query(
-                                        """
-                                        MERGE (u:User {user_id: $user_id})
-                                        CREATE (e:Episodic {
-                                          uuid: $uuid,
-                                          name: $name,
-                                          content: $content,
-                                          group_id: $group_id,
-                                          created_at: $ts,
-                                          valid_at: $ts,
-                                          source: $source,
-                                          source_description: $source_description,
-                                          episode_kind: $episode_kind,
-                                          conversation_id: $conversation_id,
-                                          covers_turns: $covers_turns,
-                                          summarized_turns: $summarized_turns,
-                                          entity_edges: []
-                                        })
-                                        MERGE (u)-[:AUTHORED]->(e)
-                                        RETURN e.uuid AS uuid
-                                        """,
-                                        user_id=self.memory.user_id,
-                                        uuid=summary_uuid_local,
-                                        name="chat_summary",
-                                        content=summary_text,
-                                        group_id="personal",
-                                        ts=ts,
-                                        source="text",
-                                        source_description="chat",
-                                        episode_kind="chat_summary",
-                                        conversation_id=conversation_id,
-                                        covers_turns=covers,
-                                        summarized_turns=[],
-                                    )
-                                    if res.records:
-                                        return res.records[0]["uuid"]
-                                    return summary_uuid_local
+                                    from pydantic import ValidationError
+                                    try:
+                                        result = await with_rate_limit_retry(
+                                            lambda: graphiti.add_episode(
+                                                name="chat_summary",
+                                                episode_body=summary_text,
+                                                source_description="chat",
+                                                reference_time=datetime.now(timezone.utc),
+                                                group_id="personal"
+                                            ),
+                                            op_name="add_episode:summary",
+                                            request_id=temp_op_id
+                                        )
+                                        
+                                        actual_episode = result.episode if hasattr(result, 'episode') else result
+                                        if isinstance(actual_episode, dict):
+                                            return actual_episode.get("uuid")
+                                        elif hasattr(actual_episode, "uuid"):
+                                            return actual_episode.uuid
+                                        else:
+                                            return None
+                                    except ValidationError as ve:
+                                        logger.error(f"Validation error during chat summary ingestion: {ve}")
+                                        # Try to recover UUID from Neo4j
+                                        driver = graphiti.driver
+                                        find_res = await driver.execute_query(
+                                            "MATCH (e:Episodic) WHERE e.content = $content RETURN e.uuid AS uuid LIMIT 1",
+                                            content=summary_text
+                                        )
+                                        if find_res.records:
+                                            recovered_uuid = find_res.records[0]['uuid']
+                                            logger.info(f"Recovered summary UUID after ValidationError: {recovered_uuid}")
+                                            return recovered_uuid
+                                        return None
                             
                             try:
                                 summary_uuid = await asyncio.wait_for(_do_write_summary(), timeout=30.0)
@@ -495,8 +506,7 @@ Please provide a helpful response based on the available context."""
                                         "conversation_id": conversation_id,
                                         "user_id": self.memory.user_id,
                                         "group_id": "personal",
-                                        # Use the turn_index that triggered this summary (same scope as should_summarize)
-                                        "turn_index": turn_index,
+                                        "turn_index": captured_turn_index,
                                         "error_type": "TimeoutError"
                                     }
                                 )
@@ -526,12 +536,30 @@ Please provide a helpful response based on the available context."""
                             if not summary_uuid:
                                 return
 
+                            # Use the turn_index that triggered this summary (captured from outer scope)
+                            # captured_turn_index was atomically allocated before summary decision
+
+                            # Attach author
+                            await attach_author(summary_uuid, self.memory.user_id)
+
+                            # Update metadata
+                            await update_episode_metadata(graphiti, summary_uuid, {
+                                "conversation_id": conversation_id,
+                                "episode_kind": "chat_summary",
+                                "covers_turns": f"{max(1, captured_turn_index-9)}-{captured_turn_index}",
+                                "summarized_turns": [uuid for uuid, _ in last_turns]
+                            })
+
+                            # Mark original turns as summarized
+                            for turn_uuid, _ in last_turns:
+                                await update_episode_metadata(graphiti, turn_uuid, {"summarized": True})
+
                             logger.info("Chat summary created", extra={
                                 "summary_uuid": summary_uuid,
                                 "conversation_id": conversation_id,
-                                "covers_turns": f"{max(1, turn_index-9)}-{turn_index}",
+                                "covers_turns": f"{max(1, captured_turn_index-9)}-{captured_turn_index}",
                                 "user_id": self.memory.user_id,
-                                "turn_index": turn_index
+                                "turn_index": captured_turn_index
                             })
 
                         except Exception as e:
