@@ -4,6 +4,7 @@ Integration tests for chat persistence:
 - Race condition safety for turn_index
 """
 
+import os
 import pytest
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -11,6 +12,11 @@ from core.graphiti_client import get_graphiti_client
 from core.memory_ops import MemoryOps
 from simple_chat_agent import SimpleChatAgent
 from core.llm import get_async_client
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_LLM_INGEST_TESTS") != "1",
+    reason="Requires LLM/Graphiti ingest; run explicitly with RUN_LLM_INGEST_TESTS=1"
+)
 
 
 async def wait_until(predicate, timeout=5.0, interval=0.1, description="condition"):

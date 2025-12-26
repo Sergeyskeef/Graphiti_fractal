@@ -383,7 +383,7 @@ Please provide a helpful response based on the available context."""
                                e.is_correction AS is_correction
                         LIMIT 1
                         """
-                        check_result = await driver.execute_query(check_query, {"uuid": episode_uuid})
+                        check_result = await driver.execute_query(check_query, uuid=episode_uuid)
                         if check_result.records:
                             record = check_result.records[0]
                             actual_conv_id = record.get("conversation_id")
@@ -438,6 +438,8 @@ Please provide a helpful response based on the available context."""
                     """Background task to create chat summary."""
                     async def _async_summarize():
                         temp_op_id = str(uuid.uuid4())[:8]
+                        # Capture turn_index from outer scope (atomically allocated)
+                        captured_turn_index = turn_index
                         try:
                             from core.graphiti_client import get_graphiti_client
                             from knowledge.ingest import update_episode_metadata
