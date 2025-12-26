@@ -390,54 +390,9 @@ async def chat(req: ChatRequest):
             "total_ms": duration_ms,
         }
 
-        # Store conversation in memory asynchronously (fire-and-forget)
-        #
         # NOTE: SimpleChatAgent.answer_core() already stores chat_turn/chat_summary episodes in the graph.
-        # This extra ingest path creates duplicates and can overwhelm episodic retrieval with chat logs.
-        # Keep it behind a flag.
-        def _store_conversation_done(task):
-            """Callback для обработки завершения background task."""
-            try:
-                if task.exception():
-                    logger.error(
-                        f"Background conversation storage failed",
-                        extra={"request_id": request_id, "user_id": req.user_id},
-                        exc_info=task.exception()
-                    )
-                else:
-                    store_ms = task.result()
-                    logger.debug(
-                        f"Conversation stored",
-                        extra={"request_id": request_id, "store_ms": store_ms, "user_id": req.user_id}
-                    )
-            except Exception as e:
-                logger.error(
-                    f"Error in conversation storage callback",
-                    extra={"request_id": request_id, "user_id": req.user_id},
-                    exc_info=e
-                )
-
-        async def _store_conversation():
-            try:
-                t_store0 = perf_counter()
-                await memory.remember_text(
-                    conversation_text,
-                    memory_type="personal",
-                    source_description="chat"
-                )
-                store_ms = (perf_counter() - t_store0) * 1000
-                return store_ms
-            except Exception as e:
-                logger.error(f"Conversation storage failed",
-                           extra={"request_id": request_id, "user_id": req.user_id}, exc_info=e)
-                raise
-
-        if config.memory.chat_save_episodes:
-            # Start background task with callback
-            task = asyncio.create_task(_store_conversation())
-            background_tasks.add(task)
-            task.add_done_callback(background_tasks.discard)
-            task.add_done_callback(_store_conversation_done)
+        # No additional storage needed here to avoid duplicates.
+        # The chat_save_episodes flag is deprecated - chat persistence is handled by SimpleChatAgent.
 
         duration_ms_total = (perf_counter() - t0) * 1000
         logger.info(
