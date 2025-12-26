@@ -8,6 +8,27 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+async def ensure_counter_constraint(graphiti):
+    """
+    Ensure unique constraint exists on ChatTurnCounter nodes.
+    This prevents duplicate counters and improves performance.
+    """
+    driver = graphiti.driver
+    try:
+        # Create constraint if it doesn't exist (idempotent)
+        constraint_query = """
+        CREATE CONSTRAINT chat_turn_counter_unique IF NOT EXISTS
+        FOR (c:ChatTurnCounter)
+        REQUIRE (c.user_id, c.conversation_id) IS UNIQUE
+        """
+        await driver.execute_query(constraint_query)
+        logger.debug("ChatTurnCounter constraint ensured")
+    except Exception as e:
+        # Constraint might already exist or Neo4j version doesn't support IF NOT EXISTS
+        # This is non-critical, log and continue
+        logger.debug(f"Could not create ChatTurnCounter constraint (may already exist): {e}")
+
+
 async def allocate_turn_index(graphiti, user_id: str, conversation_id: str) -> int:
     """
     Atomically allocate next turn index for a conversation in Neo4j.
@@ -24,6 +45,9 @@ async def allocate_turn_index(graphiti, user_id: str, conversation_id: str) -> i
         Next turn index (1-based)
     """
     driver = graphiti.driver
+    
+    # Ensure constraint exists (idempotent, called once per conversation typically)
+    await ensure_counter_constraint(graphiti)
     
     query = """
     MERGE (c:ChatTurnCounter {
@@ -49,10 +73,21 @@ async def allocate_turn_index(graphiti, user_id: str, conversation_id: str) -> i
             )
             return turn_index
         else:
-            logger.error("Failed to allocate turn_index - no records returned")
+            logger.error("Failed to allocate turn_index - no records returned", extra={
+                "user_id": user_id,
+                "conversation_id": conversation_id
+            })
             return 1  # Fallback
     except Exception as e:
-        logger.error(f"Error allocating turn_index: {e}", exc_info=e)
+        logger.error(
+            f"Error allocating turn_index: {e}",
+            extra={
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "error_type": type(e).__name__
+            },
+            exc_info=e
+        )
         return 1  # Fallback
 
 

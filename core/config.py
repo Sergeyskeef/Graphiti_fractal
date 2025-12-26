@@ -70,6 +70,16 @@ class MemorySettings(BaseSettings):
             if env_name in os.environ:
                 kwargs[field] = _env_flag(env_name)
         super().__init__(**kwargs)
+        
+        # Warn if deprecated chat_save_episodes is enabled
+        if self.chat_save_episodes:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "CHAT_SAVE_EPISODES is deprecated and ignored. "
+                "Chat persistence is now handled automatically by SimpleChatAgent. "
+                "This flag will be removed in a future version."
+            )
 
 
 class AppSettings(BaseSettings):

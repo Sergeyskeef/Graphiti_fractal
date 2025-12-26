@@ -259,33 +259,41 @@ Please provide a helpful response based on the available context."""
             response = await llm_chat_response(messages, context="chat")
             logger.debug(f"LLM response: {response[:100]!r}")
 
-            # Add to conversation buffer (L0)
-            conversation_buffer.add_turn(user_message, response)
-
             # Prepare conversation text for storage
             conversation_text = f"User: {user_message}\nAssistant: {response}"
 
+            # Allocate turn_index atomically BEFORE storing (needed for summary logic)
+            # This ensures summary decision is based on atomic counter, not local buffer
+            from core.graphiti_client import get_graphiti_client
+            from core.chat_persistence import allocate_turn_index
+            graphiti_client = get_graphiti_client()
+            graphiti_temp = await graphiti_client.ensure_ready()
+            turn_index = await allocate_turn_index(
+                graphiti_temp,
+                self.memory.user_id,
+                conversation_id
+            )
+
+            # Add to conversation buffer (L0) - after turn_index allocation
+            conversation_buffer.add_turn(user_message, response)
+
             # Store chat turn in memory (L1)
             def _store_chat_turn():
-                """Background task to store chat turn with atomic turn_index allocation."""
+                """Background task to store chat turn with pre-allocated turn_index."""
                 async def _async_store():
                     temp_op_id = str(uuid.uuid4())[:8]
                     episode_uuid = None
+                    # Capture turn_index from outer scope (atomically allocated)
+                    captured_turn_index = turn_index
                     try:
                         from core.graphiti_client import get_graphiti_client, get_write_semaphore
                         from knowledge.ingest import update_episode_metadata
                         from core.authorship import attach_author
-                        from core.chat_persistence import allocate_turn_index
 
                         graphiti_client = get_graphiti_client()
                         graphiti = await graphiti_client.ensure_ready()
 
-                        # Allocate turn_index atomically in Neo4j (safe under concurrency)
-                        turn_index = await allocate_turn_index(
-                            graphiti, 
-                            self.memory.user_id, 
-                            conversation_id
-                        )
+                        # Use pre-allocated turn_index (atomic, safe under concurrency)
 
                         write_semaphore = get_write_semaphore()
                         
@@ -347,7 +355,7 @@ Please provide a helpful response based on the available context."""
                         # Update metadata
                         await update_episode_metadata(graphiti, episode_uuid, {
                             "conversation_id": conversation_id,
-                            "turn_index": turn_index,
+                            "turn_index": captured_turn_index,
                             "episode_kind": "chat_turn",
                             "is_correction": is_correction_text(conversation_text),
                             "summarized": False
@@ -369,12 +377,12 @@ Please provide a helpful response based on the available context."""
                             actual_conv_id = record.get("conversation_id")
                             actual_turn = record.get("turn_index")
                             actual_kind = record.get("episode_kind")
-                            if actual_conv_id != conversation_id or actual_turn != turn_index or actual_kind != "chat_turn":
+                            if actual_conv_id != conversation_id or actual_turn != captured_turn_index or actual_kind != "chat_turn":
                                 logger.warning("Metadata self-check failed", extra={
                                     "episode_uuid": episode_uuid,
                                     "expected_conv_id": conversation_id,
                                     "actual_conv_id": actual_conv_id,
-                                    "expected_turn": turn_index,
+                                    "expected_turn": captured_turn_index,
                                     "actual_turn": actual_turn
                                 })
                         else:
@@ -385,15 +393,22 @@ Please provide a helpful response based on the available context."""
                         logger.info("Chat turn saved", extra={
                             "episode_uuid": episode_uuid,
                             "conversation_id": conversation_id,
-                            "turn_index": turn_index,
+                            "turn_index": captured_turn_index,
                             "user_id": self.memory.user_id
                         })
 
                     except Exception as e:
-                        logger.error("Failed to store chat turn", extra={
-                            "conversation_id": conversation_id,
-                            "user_id": self.memory.user_id
-                        }, exc_info=e)
+                        # Best effort: log error but don't fail the request
+                        logger.error(
+                            "Failed to store chat turn (best effort - request already responded)",
+                            extra={
+                                "conversation_id": conversation_id,
+                                "user_id": self.memory.user_id,
+                                "group_id": "personal",
+                                "error_type": type(e).__name__
+                            },
+                            exc_info=e
+                        )
 
                 # Run in background
                 import asyncio
@@ -403,27 +418,8 @@ Please provide a helpful response based on the available context."""
             _store_chat_turn()
 
             # Check if we need to create summary (L1b)
-            # Use atomic counter from DB instead of local buffer to avoid race conditions
-            async def _should_create_summary() -> bool:
-                """Check if summary should be created based on DB turn count."""
-                try:
-                    from core.graphiti_client import get_graphiti_client
-                    from core.chat_persistence import get_conversation_turn_count
-                    graphiti_client = get_graphiti_client()
-                    graphiti = await graphiti_client.ensure_ready()
-                    turn_count = await get_conversation_turn_count(
-                        graphiti,
-                        self.memory.user_id,
-                        conversation_id
-                    )
-                    return turn_count > 0 and turn_count % 10 == 0
-                except Exception as e:
-                    logger.warning(f"Failed to check turn count for summary: {e}")
-                    # Fallback to buffer logic
-                    return conversation_buffer.should_create_summary()
-            
-            # Check summary condition (non-blocking, will be checked in background task)
-            should_summarize = await _should_create_summary()
+            # Use the just-allocated turn_index (atomic, safe under concurrency)
+            should_summarize = turn_index > 0 and turn_index % 10 == 0
             
             if should_summarize:
                 def _create_summary():
@@ -490,25 +486,45 @@ Please provide a helpful response based on the available context."""
                             try:
                                 summary_uuid = await asyncio.wait_for(_do_write_summary(), timeout=30.0)
                             except asyncio.TimeoutError:
-                                logger.error(f"Timeout (30s) during chat summary ingestion", extra={
-                                    "conversation_id": conversation_id,
-                                    "user_id": self.memory.user_id
-                                })
+                                # Timeout is handled gracefully - request already responded to user
+                                logger.error(
+                                    "Timeout (30s) during chat summary ingestion (best effort - request already responded)",
+                                    extra={
+                                        "conversation_id": conversation_id,
+                                        "user_id": self.memory.user_id,
+                                        "group_id": "personal",
+                                        "turn_index": captured_turn_index,
+                                        "error_type": "TimeoutError"
+                                    }
+                                )
+                                return
+                            except asyncio.CancelledError:
+                                # Cancellation is expected during timeout - log and continue
+                                logger.warning(
+                                    "Chat summary ingestion cancelled (likely due to timeout)",
+                                    extra={
+                                        "conversation_id": conversation_id,
+                                        "user_id": self.memory.user_id
+                                    }
+                                )
                                 return
                             except Exception as e:
-                                logger.error(f"Unexpected error during chat summary ingestion: {e}", exc_info=e)
+                                logger.error(
+                                    f"Unexpected error during chat summary ingestion (best effort)",
+                                    extra={
+                                        "conversation_id": conversation_id,
+                                        "user_id": self.memory.user_id,
+                                        "error_type": type(e).__name__
+                                    },
+                                    exc_info=e
+                                )
                                 return
                             
                             if not summary_uuid:
                                 return
 
-                            # Get current turn count for summary metadata
-                            from core.chat_persistence import get_conversation_turn_count
-                            current_turn_count = await get_conversation_turn_count(
-                                graphiti,
-                                self.memory.user_id,
-                                conversation_id
-                            )
+                            # Use the turn_index that triggered this summary (captured from outer scope)
+                            # captured_turn_index was atomically allocated before summary decision
 
                             # Attach author
                             await attach_author(summary_uuid, self.memory.user_id)
@@ -517,7 +533,7 @@ Please provide a helpful response based on the available context."""
                             await update_episode_metadata(graphiti, summary_uuid, {
                                 "conversation_id": conversation_id,
                                 "episode_kind": "chat_summary",
-                                "covers_turns": f"{max(1, current_turn_count-9)}-{current_turn_count}",
+                                "covers_turns": f"{max(1, captured_turn_index-9)}-{captured_turn_index}",
                                 "summarized_turns": [uuid for uuid, _ in last_turns]
                             })
 
@@ -528,8 +544,9 @@ Please provide a helpful response based on the available context."""
                             logger.info("Chat summary created", extra={
                                 "summary_uuid": summary_uuid,
                                 "conversation_id": conversation_id,
-                                "covers_turns": f"{max(1, current_turn_count-9)}-{current_turn_count}",
-                                "user_id": self.memory.user_id
+                                "covers_turns": f"{max(1, captured_turn_index-9)}-{captured_turn_index}",
+                                "user_id": self.memory.user_id,
+                                "turn_index": captured_turn_index
                             })
 
                         except Exception as e:
