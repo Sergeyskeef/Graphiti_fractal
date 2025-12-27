@@ -64,13 +64,16 @@
             Activity: <path d="M22 12h-4l-3 9L9 3l-3 9H2" />,
             Maximize2: <path d="M15 3h6v6 M9 21H3v-6 M21 3l-7 7 M3 21l7-7" />,
             Trash2: <path d="M3 6h18 M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6 M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2 M10 11v6 M14 11v6" />,
-            Paperclip: <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            Paperclip: <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />,
+            X: <path d="M18 6 6 18 M6 6l12 12" />
         };
 
         const IconComp = ({ name, ...props }) => <Icon path={Icons[name] || Icons.Cpu} {...props} />;
 
         // --- MAIN APP COMPONENT ---
         function App() {
+            const GRAPH_URL = "/visualization.html";
+
             // State: Chat
             const [messages, setMessages] = useState([]);
             const [inputValue, setInputValue] = useState('');
@@ -83,9 +86,9 @@
             const audioChunksRef = useRef([]);
             const audioStreamRef = useRef(null);
 
-            // State: Sidebar
-            const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-            const [activeTab, setActiveTab] = useState('text');
+            // State: Upload Modal
+            const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+            const [uploadMemType, setUploadMemType] = useState('knowledge');
 
             // State: Forms
             const [memText, setMemText] = useState('');
@@ -348,6 +351,44 @@
             };
 
             // --- FILE UPLOAD LOGIC ---
+            const handleUpload = async () => {
+                if (!uploadFile) return;
+                setIsUploading(true);
+                setUploadStatus('Загрузка...');
+                
+                const fd = new FormData();
+                fd.append('file', uploadFile);
+                fd.append('source_description', uploadSource || uploadFile.name);
+                fd.append('memory_type', uploadMemType);
+                fd.append('user_id', 'sergey');
+
+                try {
+                    const res = await fetch('/upload', { method: 'POST', body: fd });
+                    if(!res.ok) {
+                        const errText = await res.text();
+                        throw new Error(errText || `HTTP ${res.status}`);
+                    }
+                    const data = await res.json();
+                    
+                    if (data.job_id) {
+                        pollJobStatus(data.job_id);
+                    } else {
+                        setUploadProgress(100);
+                        setIsUploading(false);
+                        setUploadStatus('✅ Загружено');
+                        addMessage('system', `✅ Файл ${uploadFile.name} загружен в ${uploadMemType}`);
+                        setTimeout(() => {
+                            setIsUploadModalOpen(false);
+                            setUploadFile(null);
+                            setUploadStatus('');
+                        }, 1500);
+                    }
+                } catch (err) {
+                    setIsUploading(false);
+                    setUploadStatus(`Ошибка: ${err.message}`);
+                }
+            };
+
             const pollJobStatus = (jobId) => {
                 const interval = setInterval(async () => {
                     try {
@@ -371,52 +412,45 @@
                         if(status.stage === 'done' || status.stage === 'error') {
                             clearInterval(interval);
                             setIsUploading(false);
-                            if(status.stage === 'done') setUploadStatus('✅ Готово!');
-                            else setUploadStatus(`❌ ${status.error}`);
+                            if(status.stage === 'done') {
+                                setUploadStatus('✅ Готово!');
+                                addMessage('system', `✅ Файл ${uploadFile?.name || 'документ'} успешно обработан`);
+                                setTimeout(() => {
+                                    setIsUploadModalOpen(false);
+                                    setUploadFile(null);
+                                    setUploadStatus('');
+                                }, 1500);
+                            } else {
+                                setUploadStatus(`❌ ${status.error}`);
+                            }
                         }
                     } catch(e) { console.error(e); }
                 }, 1000);
             };
 
-            const handleUpload = async () => {
-                if (!uploadFile) return;
-                setIsUploading(true);
-                setUploadStatus('Загрузка...');
-                
-                const fd = new FormData();
-                fd.append('file', uploadFile);
-                fd.append('source_description', uploadSource || uploadFile.name);
-                fd.append('memory_type', memType);
-                fd.append('user_id', 'sergey');
-
-                try {
-                    const res = await fetch('/upload', { method: 'POST', body: fd });
-                    if(!res.ok) {
-                        const errText = await res.text();
-                        throw new Error(errText || `HTTP ${res.status}`);
-                    }
-                    const data = await res.json();
-                    
-                    if (data.job_id) {
-                        pollJobStatus(data.job_id);
-                    } else {
-                        setUploadProgress(100);
-                        setIsUploading(false);
-                        setUploadStatus('✅ Загружено');
-                    }
-                } catch (err) {
-                    setIsUploading(false);
-                    setUploadStatus(`Ошибка: ${err.message}`);
+            const onFileChange = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    setUploadFile(file);
+                    setUploadSource(file.name);
+                    setIsUploadModalOpen(true);
                 }
+            };
+
+            const closeUploadModal = () => {
+                if (isUploading) return;
+                setIsUploadModalOpen(false);
+                setUploadFile(null);
+                setUploadStatus('');
             };
 
             // --- UI COMPONENTS ---
             return (
-                <div className="flex h-screen overflow-hidden text-sm md:text-base">
+                <div className="flex h-screen overflow-hidden text-sm md:text-base bg-slate-950">
                     {/* MAIN CHAT */}
                     <div className="flex-1 flex flex-col relative min-w-0">
                         {/* HEADER */}
-                        <header className="h-16 bg-slate-900/80 border-b border-slate-800 flex items-center justify-between px-6 backdrop-blur">
+                        <header className="h-16 bg-slate-900/80 border-b border-slate-800 flex items-center justify-between px-6 backdrop-blur z-10">
                             <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-white shadow-lg shadow-cyan-500/20">
                                     <IconComp name="Cpu" size={18} />
@@ -426,171 +460,210 @@
                                     <span className="text-xs text-slate-400">Agent Console v2.0</span>
                                 </div>
                             </div>
-                            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 text-slate-400 hover:text-white transition">
-                                <IconComp name="Maximize2" />
-                            </button>
+                            
+                            <div className="flex items-center gap-2">
+                                <button 
+                                    onClick={() => window.location.href = GRAPH_URL}
+                                    className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-sm transition border border-slate-700"
+                                    title="Открыть визуализацию графа"
+                                >
+                                    <IconComp name="Activity" size={16} />
+                                    <span className="hidden sm:inline">Граф</span>
+                                </button>
+                                
+                                <div className="w-px h-6 bg-slate-800 mx-1" />
+                                
+                                <button 
+                                    onClick={handleClearBuffer}
+                                    className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition"
+                                    title="Очистить буфер контекста"
+                                >
+                                    <IconComp name="Trash2" size={18} />
+                                </button>
+                                
+                                <button 
+                                    onClick={handleClearMemory}
+                                    className="p-2 text-red-500/70 hover:text-red-400 hover:bg-red-950/30 rounded-lg transition"
+                                    title="Полная очистка памяти"
+                                >
+                                    <IconComp name="Trash2" size={18} />
+                                </button>
+                            </div>
                         </header>
 
                         {/* MESSAGES */}
-                        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                            {messages.length === 0 && (
-                                <div className="h-full flex flex-col items-center justify-center text-slate-600">
-                                    <IconComp name="Activity" size={48} className="mb-4 opacity-50" />
-                                    <p>Система готова. Начните диалог.</p>
-                                </div>
-                            )}
-                            {messages.map(msg => (
-                                <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                    <div className={`max-w-[80%] p-4 rounded-2xl shadow-md ${
-                                        msg.role === 'user' 
-                                            ? 'bg-blue-600 text-white rounded-tr-none' 
-                                            : msg.role === 'system'
-                                            ? 'bg-red-900/40 border border-red-800 text-red-200'
-                                            : 'bg-slate-800 text-slate-200 border border-slate-700 rounded-tl-none'
-                                    }`}>
-                                        <div className="whitespace-pre-wrap">{msg.text}</div>
-                                        {msg.metrics && (
-                                            <div className="mt-2 pt-2 border-t border-white/10 text-[10px] opacity-60 flex gap-2">
-                                                {msg.metrics.answer_ms && <span>Gen: {Math.round(msg.metrics.answer_ms)}ms</span>}
-                                            </div>
-                                        )}
+                        <div className="flex-1 overflow-y-auto p-4 space-y-4 scroll-smooth">
+                            <div className="max-w-4xl mx-auto w-full">
+                                {messages.length === 0 && (
+                                    <div className="h-[60vh] flex flex-col items-center justify-center text-slate-600">
+                                        <div className="w-16 h-16 rounded-full bg-slate-900 flex items-center justify-center mb-6 border border-slate-800 shadow-xl">
+                                            <IconComp name="Activity" size={32} className="opacity-20" />
+                                        </div>
+                                        <p className="text-lg font-medium text-slate-500">Система готова</p>
+                                        <p className="text-sm opacity-50 mt-1">Начните диалог или загрузите файл</p>
                                     </div>
-                                </div>
-                            ))}
-                            <div ref={messagesEndRef} />
+                                )}
+                                {messages.map(msg => (
+                                    <div key={msg.id} className={`flex mb-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                        <div className={`max-w-[85%] p-4 rounded-2xl shadow-sm ${
+                                            msg.role === 'user' 
+                                                ? 'bg-blue-600 text-white rounded-tr-none' 
+                                                : msg.role === 'system'
+                                                ? 'bg-slate-900/50 border border-slate-800 text-cyan-400 text-xs py-2 px-4 italic'
+                                                : 'bg-slate-800 text-slate-200 border border-slate-700 rounded-tl-none'
+                                        }`}>
+                                            <div className="whitespace-pre-wrap">{msg.text}</div>
+                                            {msg.metrics && (
+                                                <div className="mt-2 pt-2 border-t border-white/10 text-[10px] opacity-60 flex gap-2">
+                                                    {msg.metrics.answer_ms && <span>Gen: {Math.round(msg.metrics.answer_ms)}ms</span>}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                ))}
+                                <div ref={messagesEndRef} />
+                            </div>
                         </div>
 
                         {/* INPUT AREA */}
-                        <div className="p-4 bg-slate-950 border-t border-slate-800">
-                            <form onSubmit={handleSendMessage} className="max-w-4xl mx-auto flex items-end gap-3 bg-slate-900 p-2 rounded-xl border border-slate-800 focus-within:border-cyan-500/50 transition-colors">
-                                <button 
-                                    type="button"
-                                    onClick={isRecording ? stopRecording : startRecording}
-                                    disabled={isSending || isTranscribing}
-                                    className={`p-3 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed ${isRecording ? 'bg-red-500 text-white animate-pulse' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
-                                >
-                                    <IconComp name={isRecording ? "Stop" : "Mic"} />
-                                </button>
-                                
-                                <textarea 
-                                    ref={textareaRef}
-                                    className="flex-1 bg-transparent border-none focus:ring-0 text-white placeholder-slate-500 py-3 min-h-[44px] max-h-32 resize-none overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent"
-                                    placeholder={isRecording ? "Говорите..." : (isTranscribing ? "Распознаю речь..." : "Сообщение...")}
-                                    value={inputValue}
-                                    onChange={e => setInputValue(e.target.value)}
-                                    onKeyDown={handleKeyDown}
-                                    disabled={isRecording}
-                                    rows={1}
-                                />
-                                
-                                <button
-                                    type="submit"
-                                    disabled={!inputValue.trim() || isSending || isRecording || isTranscribing}
-                                    className="p-3 bg-blue-600 text-white rounded-lg hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition"
-                                >
-                                    <IconComp name="Send" />
-                                </button>
-                            </form>
+                        <div className="p-4 bg-slate-950 border-t border-slate-900/50">
+                            <div className="max-w-4xl mx-auto relative">
+                                <form onSubmit={handleSendMessage} className="flex items-end gap-2 bg-slate-900 p-2 rounded-2xl border border-slate-800 focus-within:border-blue-500/50 transition-all shadow-2xl">
+                                    <input 
+                                        type="file" 
+                                        ref={fileInputRef} 
+                                        className="hidden" 
+                                        accept=".txt,.md,.pdf"
+                                        onChange={onFileChange} 
+                                    />
+                                    
+                                    <button 
+                                        type="button"
+                                        onClick={() => fileInputRef.current?.click()}
+                                        className="p-3 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition"
+                                        title="Прикрепить файл (.txt, .md, .pdf)"
+                                    >
+                                        <IconComp name="Paperclip" />
+                                    </button>
+
+                                    <button 
+                                        type="button"
+                                        onClick={isRecording ? stopRecording : startRecording}
+                                        disabled={isSending || isTranscribing}
+                                        className={`p-3 rounded-xl transition-all disabled:opacity-50 ${isRecording ? 'bg-red-500 text-white animate-pulse' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}
+                                    >
+                                        <IconComp name={isRecording ? "Stop" : "Mic"} />
+                                    </button>
+                                    
+                                    <textarea 
+                                        ref={textareaRef}
+                                        className="flex-1 bg-transparent border-none focus:ring-0 text-white placeholder-slate-600 py-3 min-h-[44px] max-h-48 resize-none overflow-y-auto"
+                                        placeholder={isRecording ? "Говорите..." : (isTranscribing ? "Распознаю речь..." : "Спросите о чем-нибудь...")}
+                                        value={inputValue}
+                                        onChange={e => setInputValue(e.target.value)}
+                                        onKeyDown={handleKeyDown}
+                                        disabled={isRecording}
+                                        rows={1}
+                                    />
+                                    
+                                    <button
+                                        type="submit"
+                                        disabled={!inputValue.trim() || isSending || isRecording || isTranscribing}
+                                        className="p-3 bg-blue-600 text-white rounded-xl hover:bg-blue-500 disabled:opacity-50 shadow-lg shadow-blue-500/20 transition-all"
+                                    >
+                                        <IconComp name="Send" />
+                                    </button>
+                                </form>
+                            </div>
                         </div>
                     </div>
 
-                    {/* SIDEBAR */}
-                    {isSidebarOpen && (
-                        <div className="w-80 md:w-96 bg-slate-900 border-l border-slate-800 flex flex-col shrink-0 transition-all">
-                            {/* TABS */}
-                            <div className="flex border-b border-slate-800">
-                                {['text', 'file', 'graph'].map(tab => (
-                                    <button 
-                                        key={tab}
-                                        onClick={() => setActiveTab(tab)}
-                                        className={`flex-1 py-3 text-sm font-medium border-b-2 transition-colors ${
-                                            activeTab === tab ? 'border-cyan-500 text-cyan-400' : 'border-transparent text-slate-500 hover:text-slate-300'
-                                        }`}
-                                    >
-                                        {tab === 'text' && 'Факты'}
-                                        {tab === 'file' && 'Файл'}
-                                        {tab === 'graph' && 'Граф'}
+                    {/* UPLOAD MODAL */}
+                    {isUploadModalOpen && (
+                        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md shadow-2xl overflow-hidden animate-in fade-in zoom-in duration-200">
+                                <div className="p-6 border-b border-slate-800 flex justify-between items-center">
+                                    <h3 className="text-lg font-bold text-white">Загрузка файла</h3>
+                                    <button onClick={closeUploadModal} className="text-slate-500 hover:text-white transition">
+                                        <IconComp name="X" size={20} />
                                     </button>
-                                ))}
-                            </div>
+                                </div>
+                                
+                                <div className="p-6 space-y-6">
+                                    <div className="flex items-center gap-4 p-4 bg-slate-850 rounded-2xl border border-slate-800">
+                                        <div className="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-400">
+                                            <IconComp name="FileText" size={24} />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <p className="text-sm font-medium text-white truncate">{uploadFile?.name}</p>
+                                            <p className="text-xs text-slate-500">{(uploadFile?.size / 1024).toFixed(1)} KB</p>
+                                        </div>
+                                    </div>
 
-                            {/* CONTENT */}
-                            <div className="flex-1 p-5 overflow-y-auto">
-                                <div className="mb-4">
-                                    <label className="text-xs text-slate-500 font-bold uppercase block mb-1">Тип памяти</label>
-                                    <select 
-                                        value={memType} onChange={e => setMemType(e.target.value)}
-                                        className="w-full bg-slate-800 border border-slate-700 text-slate-200 rounded p-2 text-sm focus:border-cyan-500 outline-none"
-                                    >
-                                        <option value="knowledge">📚 Общие знания</option>
-                                        <option value="project">📁 Проект</option>
-                                        <option value="personal">🧑 Личное</option>
-                                    </select>
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Куда сохранить?</label>
+                                        <div className="grid grid-cols-1 gap-2">
+                                            {[
+                                                { id: 'knowledge', label: 'Общие знания', icon: '📚' },
+                                                { id: 'project', label: 'Проект', icon: '📁' },
+                                                { id: 'personal', label: 'Личное', icon: '🧑' }
+                                            ].map(type => (
+                                                <button
+                                                    key={type.id}
+                                                    onClick={() => setUploadMemType(type.id)}
+                                                    className={`flex items-center gap-3 p-3 rounded-xl border transition-all ${
+                                                        uploadMemType === type.id 
+                                                            ? 'bg-blue-600/10 border-blue-500 text-blue-400' 
+                                                            : 'bg-slate-850 border-slate-800 text-slate-400 hover:border-slate-700'
+                                                    }`}
+                                                >
+                                                    <span className="text-xl">{type.icon}</span>
+                                                    <span className="text-sm font-medium">{type.label}</span>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Описание источника</label>
+                                        <input 
+                                            className="w-full bg-slate-850 border border-slate-800 rounded-xl p-3 text-sm text-white focus:border-blue-500 outline-none transition-colors"
+                                            placeholder="Название или описание..."
+                                            value={uploadSource}
+                                            onChange={e => setUploadSource(e.target.value)}
+                                        />
+                                    </div>
+
+                                    {isUploading && (
+                                        <div className="space-y-2">
+                                            <div className="flex justify-between text-xs font-medium">
+                                                <span className="text-slate-400">{uploadStatus}</span>
+                                                <span className="text-blue-400">{uploadProgress}%</span>
+                                            </div>
+                                            <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                                                <div 
+                                                    className="h-full bg-blue-500 transition-all duration-300 shadow-[0_0_10px_rgba(59,130,246,0.5)]" 
+                                                    style={{width: `${uploadProgress}%`}} 
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
 
-                                {activeTab === 'text' && (
-                                    <div className="space-y-4 fade-in">
-                                        <textarea 
-                                            className="w-full h-32 bg-slate-800 border border-slate-700 rounded p-3 text-slate-200 text-sm focus:border-cyan-500 outline-none resize-none"
-                                            placeholder="Введите факт, который агент должен запомнить..."
-                                            value={memText} onChange={e => setMemText(e.target.value)}
-                                        ></textarea>
-                                        <input 
-                                            className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-sm text-slate-200"
-                                            placeholder="Источник (опционально)"
-                                            value={memSource} onChange={e => setMemSource(e.target.value)}
-                                        />
-                                        <button onClick={handleRemember} className="w-full py-2 bg-cyan-600 text-white rounded hover:bg-cyan-500 transition">Запомнить</button>
-                                    </div>
-                                )}
-
-                                {activeTab === 'file' && (
-                                    <div className="space-y-4 fade-in">
-                                        <div 
-                                            className="border-2 border-dashed border-slate-700 hover:border-cyan-500 hover:bg-slate-800 rounded-lg p-6 text-center cursor-pointer transition"
-                                            onClick={() => fileInputRef.current?.click()}
-                                        >
-                                            <input type="file" ref={fileInputRef} className="hidden" onChange={e => setUploadFile(e.target.files[0])} />
-                                            {uploadFile ? (
-                                                <div className="text-cyan-400 font-medium truncate">{uploadFile.name}</div>
-                                            ) : (
-                                                <div className="text-slate-500 text-sm">Нажмите для выбора файла<br/>(.txt, .md)</div>
-                                            )}
-                                        </div>
-                                        <button 
-                                            onClick={handleUpload} 
-                                            disabled={!uploadFile || isUploading}
-                                            className="w-full py-2 bg-purple-600 text-white rounded hover:bg-purple-500 disabled:opacity-50 transition"
-                                        >
-                                            {isUploading ? 'Загрузка...' : 'Загрузить в базу'}
-                                        </button>
-                                        {isUploading && (
-                                            <div className="h-1 bg-slate-800 rounded overflow-hidden">
-                                                <div className="h-full bg-purple-500 transition-all" style={{width: `${uploadProgress}%`}}></div>
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-
-                                {activeTab === 'graph' && (
-                                    <div className="text-center space-y-4 fade-in">
-                                        <div className="p-4 bg-slate-800 rounded-lg border border-slate-700">
-                                            <p className="text-sm text-slate-400 mb-3">Визуализация графа открывается в отдельном окне для лучшей производительности.</p>
-                                            <a href="/visualization.html" target="_blank" className="inline-flex items-center gap-2 text-emerald-400 hover:text-emerald-300 font-medium">
-                                                <IconComp name="Activity" size={16} /> Открыть Граф
-                                            </a>
-                                        </div>
-                                    </div>
-                                )}
-
-                                {uploadStatus && <div className="mt-4 p-3 bg-slate-800 rounded text-xs text-center text-slate-300">{uploadStatus}</div>}
-                                
-                                <div className="mt-8 pt-6 border-t border-slate-800 grid grid-cols-2 gap-2">
-                                    <button onClick={handleClearBuffer} className="flex items-center justify-center gap-2 py-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded text-sm transition">
-                                        <IconComp name="Trash2" size={14} /> Очистить буфер
+                                <div className="p-6 bg-slate-850/50 border-t border-slate-800 flex gap-3">
+                                    <button 
+                                        disabled={isUploading}
+                                        onClick={closeUploadModal}
+                                        className="flex-1 py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-medium transition disabled:opacity-50"
+                                    >
+                                        Отмена
                                     </button>
-                                    <button onClick={handleClearMemory} className="flex items-center justify-center gap-2 py-2 text-red-500 hover:bg-red-950/30 rounded text-sm transition">
-                                        <IconComp name="Trash2" size={14} /> Очистить память
+                                    <button 
+                                        disabled={isUploading}
+                                        onClick={handleUpload}
+                                        className="flex-1 py-3 px-4 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-medium shadow-lg shadow-blue-600/20 transition disabled:opacity-50"
+                                    >
+                                        Загрузить
                                     </button>
                                 </div>
                             </div>
