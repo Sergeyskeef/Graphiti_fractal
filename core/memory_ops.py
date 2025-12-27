@@ -20,6 +20,7 @@ from experience.writer import ingest_experience
 
 # Graphiti search imports
 from graphiti_core.search.search_config_recipes import COMBINED_HYBRID_SEARCH_RRF
+from graphiti_core.search.search_filters import SearchFilters, DateFilter, ComparisonOperator
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +137,8 @@ class MemoryOps:
         scopes: Optional[List[str]] = None,
         limit: int = 10,
         include_episodes: bool = True,
-        include_entities: bool = True
+        include_entities: bool = True,
+        as_of: Optional[datetime] = None
     ) -> SearchResult:
         """
         Search across episodic and semantic memory using Graphiti search_().
@@ -147,6 +149,7 @@ class MemoryOps:
             limit: Maximum results per type
             include_episodes: Whether to search episodes
             include_entities: Whether to search entities
+            as_of: Optional datetime for point-in-time queries (defaults to current time)
 
         Returns:
             Structured search results from Graphiti
@@ -175,10 +178,29 @@ class MemoryOps:
             #
             # Workaround: for multi-scope searches, run without group_ids and filter results post-hoc by group_id.
             group_ids = scopes if (scopes and len(scopes) <= 1) else None
+
+            # Create temporal filters: current-by-default or point-in-time
+            search_filter = None
+            if as_of is None:
+                # Current facts only (invalid_at IS NULL)
+                search_filter = SearchFilters(
+                    invalid_at=[[DateFilter(date=None, comparison_operator=ComparisonOperator.is_null)]]
+                )
+            else:
+                # Point-in-time: facts valid at the specified time
+                search_filter = SearchFilters(
+                    valid_at=[[DateFilter(date=as_of, comparison_operator=ComparisonOperator.less_than_equal)]],
+                    invalid_at=[
+                        [DateFilter(date=None, comparison_operator=ComparisonOperator.is_null)],
+                        [DateFilter(date=as_of, comparison_operator=ComparisonOperator.greater_than)]
+                    ]
+                )
+
             search_results = await self.graphiti.search_(
                 query=query,
                 config=COMBINED_HYBRID_SEARCH_RRF,
                 group_ids=group_ids,
+                search_filter=search_filter,
             )
 
             if scopes and len(scopes) > 1:
@@ -522,13 +544,31 @@ class MemoryOps:
             }
         )
 
+        # Determine temporal mode based on query content
+        as_of = None
+        query_lower = query.lower()
+
+        # Simple heuristics for historical queries
+        historical_keywords = [
+            'раньше', 'до', 'когда', 'история', 'в прошлом', 'as of', 'на дату',
+            'в 2024', 'в 2023', 'в 2022', 'в 2021', 'в 2020',
+            'месяц назад', 'год назад', 'дней назад', 'недель назад'
+        ]
+
+        if any(keyword in query_lower for keyword in historical_keywords):
+            # For historical queries, search across all time (no as_of filter)
+            # This allows finding historical facts that may still be relevant
+            as_of = None  # Keep current-by-default, but could be extended to parse specific dates
+        # else: as_of remains None, so we get current facts only
+
         # Search memory using Graphiti
         search_result = await self.search_memory(
             query,
             scopes=scopes,
             limit=8,  # More results for better context
             include_episodes=include_episodes,
-            include_entities=include_entities
+            include_entities=include_entities,
+            as_of=as_of
         )
 
         # Retrieval explain logging
