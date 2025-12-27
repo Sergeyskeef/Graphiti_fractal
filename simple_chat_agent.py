@@ -4,12 +4,16 @@ Simple Chat Agent with Memory Integration
 Uses MemoryOps for context retrieval and conversation storage.
 """
 
+from __future__ import annotations
 import logging
 import asyncio
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TYPE_CHECKING
 from datetime import datetime, timezone
 from time import perf_counter
 import uuid
+
+if TYPE_CHECKING:
+    from core.types import ContextResult
 
 from core.llm import llm_chat_response
 from core.memory_ops import MemoryOps
