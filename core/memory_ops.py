@@ -8,13 +8,17 @@ Uses existing Graphiti functionality without modifying its behavior.
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 import logging
+from time import perf_counter
 
 from .graphiti_client import get_graphiti_client, get_write_semaphore
 from .datetime_utils import normalize_dt, dt_to_iso, calculate_recency_days
-from .text_utils import is_correction_text
+from .text_utils import is_correction_text, fingerprint
 from .types import SearchResult, ContextResult, EpisodeDict, EntityDict, EdgeDict, CommunityDict
 from .config import get_config
-from knowledge.ingest import remember_text
+from .rate_limit_retry import with_rate_limit_retry
+from .authorship import attach_author
+
+from knowledge.ingest import resolve_group_id, _infer_memory_type # Reuse helpers
 from queries.context_builder import build_agent_context
 from experience.writer import ingest_experience
 
@@ -65,6 +69,105 @@ class MemoryOps:
         self.graphiti = graphiti
         self.user_id = user_id
 
+    async def ingest_pipeline(
+        self,
+        text: str,
+        *,
+        source_description: str = "ingest_pipeline",
+        memory_type: str = "knowledge",
+        group_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Atomic ingestion pipeline ensuring idempotency and reliability.
+        
+        1. Calculates fingerprint (idempotency check).
+        2. Uses single add_episode call (temporal validity).
+        3. Attaches authorship and metadata atomically (or best effort with retry).
+        """
+        start_time = perf_counter()
+        
+        if not text or not text.strip():
+            return {"status": "error", "reason": "empty_text"}
+
+        # 1. Fingerprint & Idempotency
+        fp = fingerprint(text)
+        driver = getattr(self.graphiti, "driver", None) or getattr(self.graphiti, "_driver", None)
+        
+        if driver:
+            # Check if exactly this content already exists
+            res = await driver.execute_query(
+                "MATCH (e:Episodic) WHERE e.fingerprint = $fp RETURN e.uuid as uuid LIMIT 1", 
+                fp=fp
+            )
+            if res.records:
+                existing_uuid = res.records[0]["uuid"]
+                logger.info(f"Ingest skipped (duplicate): {fp} -> {existing_uuid}")
+                return {"status": "skipped", "reason": "duplicate", "uuid": existing_uuid}
+
+        # 2. Resolve Group ID
+        # If group_id is not provided, resolve from memory_type
+        target_group_id = group_id or resolve_group_id(memory_type)
+
+        # 3. Add Episode with Retry
+        async def _add_op():
+            return await self.graphiti.add_episode(
+                name=source_description[:100] or "pipeline_ingest",
+                episode_body=text,
+                source_description=source_description,
+                reference_time=datetime.now(timezone.utc),
+                group_id=target_group_id
+            )
+
+        try:
+            # We use the global write semaphore implicit in call chains or if needed here
+            # But add_episode in graphiti client usually handles connection.
+            # We wrap in retry for reliability.
+            result = await with_rate_limit_retry(_add_op, op_name="ingest_pipeline")
+        except Exception as e:
+            logger.error(f"Ingest pipeline failed during add_episode: {e}")
+            raise
+
+        # 4. Extract UUID
+        episode_uuid = None
+        if hasattr(result, 'uuid'):
+            episode_uuid = result.uuid
+        elif isinstance(result, dict):
+            episode_uuid = result.get('uuid')
+        elif hasattr(result, 'episode') and hasattr(result.episode, 'uuid'):
+             episode_uuid = result.episode.uuid
+        
+        if not episode_uuid:
+            logger.error(f"Ingest pipeline: No UUID returned. Result: {result}")
+            return {"status": "error", "reason": "no_uuid_returned"}
+
+        # 5. Post-processing (Fingerprint, Author)
+        if driver:
+            try:
+                # Set fingerprint for future idempotency
+                await driver.execute_query(
+                    "MATCH (e:Episodic {uuid: $uuid}) SET e.fingerprint = $fp",
+                    uuid=episode_uuid, fp=fp
+                )
+                
+                # Attach Author
+                if self.user_id:
+                    await attach_author(episode_uuid, self.user_id)
+                    
+            except Exception as e:
+                logger.warning(f"Ingest pipeline post-processing partial fail: {e}")
+                # We don't fail the whole operation if just metadata update fails, 
+                # but we log it. The episode is already safely in DB.
+
+        elapsed = perf_counter() - start_time
+        logger.info(f"Ingest pipeline success: {episode_uuid} ({elapsed:.3f}s)")
+        
+        return {
+            "status": "success",
+            "uuid": episode_uuid,
+            "group_id": target_group_id,
+            "elapsed": elapsed
+        }
+
     async def remember_text(
         self,
         text: str,
@@ -94,15 +197,16 @@ class MemoryOps:
             "source_description": source_description,
             "timestamp": datetime.now().isoformat()
         })
-        # deque автоматически ограничивает размер
+        
+        # Inference if needed
+        if not memory_type:
+            memory_type = _infer_memory_type(text, source_description or "")
 
-        # Also store in Graphiti
-        return await remember_text(
-            self.graphiti,
+        # Use atomic pipeline
+        return await self.ingest_pipeline(
             text,
             source_description=source_description or "memory_ops",
-            memory_type=memory_type,
-            user_id=self.user_id
+            memory_type=memory_type
         )
 
     async def remember_experience(

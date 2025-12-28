@@ -1,40 +1,105 @@
 import asyncio
 import json
+import logging
 
 from core import get_graphiti_client
 
+logger = logging.getLogger(__name__)
 
-async def export_graph_for_vis(graphiti, depth: int = 2, limit: int = 50):
+async def export_graph_for_vis(graphiti, limit: int = 500):
     """
-    Export graph structure for D3.js/Cytoscape visualization.
-    Returns: {nodes: [...], edges: [...]}
+    Export graph structure for D3.js/Cytoscape visualization using direct Cypher.
+    
+    Fetches:
+    - Nodes: Entity, Episodic, Community
+    - Edges: RELATES_TO, SAME_AS, MENTIONS, BELONGS_TO
     """
+    driver = getattr(graphiti, "driver", None) or getattr(graphiti, "_driver", None)
+    if not driver:
+        logger.error("Graphiti driver not found for export")
+        return {"nodes": [], "edges": [], "error": "No driver"}
 
-    search_results = await graphiti._search("*", limit=limit)
-
-    nodes_data = []
+    nodes_map = {}
     edges_list = []
 
-    for node in search_results.nodes:
-        nodes_data.append(
-            {
-                "id": str(node.uuid),
-                "label": node.name,
-                "title": node.node_type,
-                "type": node.node_type,
-                "size": 20 if "Person" in node.node_type else 30,
-            }
-        )
+    # 1. Fetch Nodes (Entities & Communities)
+    # We limit to Entities and Communities to keep visualization clean, 
+    # optionally Episodic if needed (but usually too many).
+    query_nodes = """
+    MATCH (n)
+    WHERE (n:Entity OR n:Community) AND n.uuid IS NOT NULL
+    RETURN n.uuid as uuid, n.name as name, labels(n) as labels, n.group_id as group_id, n.summary as summary
+    LIMIT $limit
+    """
 
-    for edge in search_results.edges:
-        edges_list.append(
-            {
-                "from": str(edge.source_id),
-                "to": str(edge.target_id),
-                "label": edge.relationship_type,
-                "arrows": "to",
+    try:
+        if hasattr(driver, 'execute_query'):
+            res_nodes = await driver.execute_query(query_nodes, limit=limit)
+            records_nodes = res_nodes.records
+        else:
+            async with driver.session() as session:
+                res_nodes = await session.run(query_nodes, limit=limit)
+                records_nodes = await res_nodes.list()
+
+        for rec in records_nodes:
+            uuid = rec['uuid']
+            labels = rec['labels']
+            node_type = "Entity"
+            if "Community" in labels:
+                node_type = "Community"
+            elif "Episodic" in labels:
+                node_type = "Episodic"
+            elif "User" in labels:
+                node_type = "User"
+            
+            nodes_map[uuid] = {
+                "id": str(uuid),
+                "label": rec['name'] or f"{node_type}:{uuid[:4]}",
+                "title": rec['summary'] or "",
+                "type": node_type,
+                "group": rec['group_id'] or "default",
+                "size": 30 if node_type == "Community" else 20
             }
-        )
+
+    except Exception as e:
+        logger.error(f"Error exporting nodes: {e}")
+
+    # 2. Fetch Edges
+    # We only fetch edges where both source and target are in our fetched nodes map
+    query_edges = """
+    MATCH (n)-[r]->(m)
+    WHERE n.uuid IS NOT NULL AND m.uuid IS NOT NULL
+    RETURN n.uuid as source, m.uuid as target, type(r) as type, r.fact as fact
+    LIMIT $limit
+    """
+
+    try:
+        if hasattr(driver, 'execute_query'):
+            res_edges = await driver.execute_query(query_edges, limit=limit * 2)
+            records_edges = res_edges.records
+        else:
+            async with driver.session() as session:
+                res_edges = await session.run(query_edges, limit=limit * 2)
+                records_edges = await res_edges.list()
+
+        for rec in records_edges:
+            src = rec['source']
+            tgt = rec['target']
+            
+            # Filter edges to only those connecting nodes we have
+            if src in nodes_map and tgt in nodes_map:
+                edges_list.append({
+                    "from": str(src),
+                    "to": str(tgt),
+                    "label": rec['type'],
+                    "title": rec['fact'] or "",
+                    "arrows": "to"
+                })
+
+    except Exception as e:
+        logger.error(f"Error exporting edges: {e}")
+
+    nodes_data = list(nodes_map.values())
 
     return {
         "nodes": nodes_data,
@@ -64,4 +129,3 @@ async def test_export():
 
 if __name__ == "__main__":
     asyncio.run(test_export())
-

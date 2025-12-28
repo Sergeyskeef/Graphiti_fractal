@@ -51,147 +51,6 @@ class CustomEmbedder(EmbedderClient):
 load_dotenv()
 
 
-class ExtendedGraphiti(Graphiti):
-    """
-    Расширенная версия Graphiti, которая добавляет логику склейки сущностей (Entity Gluing)
-    после добавления эпизода.
-    """
-    
-    STOP_WORDS = {
-        "project", "system", "data", "memory", "graph", "ai", "model", 
-        "user", "assistant", "chat", "summary", "context", "fact",
-        "проект", "система", "данные", "память", "граф", "ии", "модель", 
-        "пользователь", "ассистент", "чат", "саммари", "контекст", "факт",
-        "unknown", "none", "null"
-    }
-
-    async def add_episode(self, *args, **kwargs):
-        # Вызов оригинального метода
-        result = await super().add_episode(*args, **kwargs)
-        
-        # Пост-процессинг: склейка сущностей
-        try:
-            episode_uuid = None
-            if hasattr(result, 'uuid'):
-                episode_uuid = result.uuid
-            elif hasattr(result, 'episode') and hasattr(result.episode, 'uuid'):
-                episode_uuid = result.episode.uuid
-            elif isinstance(result, dict):
-                episode_uuid = result.get('uuid')
-            
-            if episode_uuid:
-                await self._link_cross_layer_entities(episode_uuid)
-            else:
-                logger.warning(f"Could not determine episode UUID from result type {type(result)}")
-        except Exception as e:
-            logger.error(f"Error in cross-layer linking: {e}", exc_info=True)
-            
-        return result
-
-    def _normalize_name(self, name: str) -> Optional[str]:
-        if not name:
-            return None
-        
-        # 1. Lowercase and trim
-        norm = name.lower().strip()
-        
-        # 2. Cyrillic normalization
-        norm = norm.replace('ё', 'е')
-        
-        # 3. Remove punctuation (keep alphanumeric and spaces)
-        import re
-        norm = re.sub(r'[^\w\s]', '', norm)
-        
-        # 4. Collapse whitespace
-        norm = re.sub(r'\s+', ' ', norm).strip()
-        
-        # 5. Check length and stop words
-        if len(norm) < 3:  # Too short (require at least 3 chars)
-            return None
-            
-        if norm in self.STOP_WORDS:
-            return None
-            
-        return norm
-
-    async def _link_cross_layer_entities(self, episode_uuid: str):
-        driver = getattr(self, 'driver', None) or getattr(self, '_driver', None)
-        
-        if not driver:
-            logger.warning("Graphiti driver not found, skipping cross-layer linking")
-            return
-
-        # 1. Fetch entities from the episode
-        fetch_query = """
-        MATCH (ep:Episodic {uuid: $episode_uuid})-[:MENTIONS]->(e:Entity)
-        WHERE e.name IS NOT NULL
-        RETURN e.uuid as uuid, e.name as name, e.group_id as group_id
-        """
-        
-        entities_to_update = []
-        
-        try:
-            records = []
-            if hasattr(driver, 'execute_query'):
-                res = await driver.execute_query(fetch_query, episode_uuid=episode_uuid)
-                records = res.records
-            else:
-                async with driver.session() as session:
-                    res = await session.run(fetch_query, episode_uuid=episode_uuid)
-                    records = await res.list() # safe iteration if async
-            
-            # 2. Normalize names in Python
-            for record in records:
-                uuid = record['uuid']
-                name = record['name']
-                norm = self._normalize_name(name)
-                
-                if norm:
-                    entities_to_update.append({"uuid": uuid, "name_norm": norm})
-            
-            if not entities_to_update:
-                logger.info(f"No valid entities to link for episode {episode_uuid}")
-                return
-
-            # 3. Batch update name_norm and Link
-            link_query = """
-            UNWIND $updates AS update
-            MATCH (e:Entity {uuid: update.uuid})
-            SET e.name_norm = update.name_norm
-            
-            WITH e
-            MATCH (other:Entity {name_norm: e.name_norm})
-            WHERE other.group_id <> e.group_id AND other.uuid <> e.uuid
-            
-            // Lock order to prevent deadlocks/dupes
-            WITH e, other
-            WHERE e.uuid < other.uuid
-            
-            MERGE (e)-[r:SAME_AS]->(other)
-            RETURN count(r) as created_count, collect(other.name) as linked_names
-            """
-            
-            if hasattr(driver, 'execute_query'):
-                res = await driver.execute_query(link_query, updates=entities_to_update)
-                records = res.records
-            else:
-                async with driver.session() as session:
-                    res = await session.run(link_query, updates=entities_to_update)
-                    records = await res.list()
-            
-            total_created = sum(r['created_count'] for r in records)
-            linked_names = [name for r in records for name in r['linked_names']]
-            
-            logger.info(f"Cross-layer linking stats for episode {episode_uuid}", extra={
-                "candidates_processed": len(entities_to_update),
-                "bridges_created": total_created,
-                "linked_entities": linked_names[:10]
-            })
-            
-        except Exception as e:
-            logger.error(f"Failed to execute cross-layer linking: {e}")
-
-
 class GraphitiClient:
     """Обёртка над Graphiti с ленивой инициализацией и созданием индексов."""
 
@@ -204,7 +63,9 @@ class GraphitiClient:
         # graphiti_core 0.24.x не принимает database/openai_api_key в __init__
         # Используем custom embedder с нашим кэшированием
         custom_embedder = CustomEmbedder()
-        self._graphiti = ExtendedGraphiti(
+        
+        # Используем стандартный класс Graphiti без надстроек (Native Graphiti Way)
+        self._graphiti = Graphiti(
             uri=uri,
             user=user,
             password=password,
@@ -287,4 +148,3 @@ def get_graphiti_client(*, force_new: bool = False) -> GraphitiClient:
 def get_write_semaphore() -> asyncio.Semaphore:
     """Получить семафор для операций записи."""
     return WRITE_SEMAPHORE
-

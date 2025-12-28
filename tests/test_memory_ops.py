@@ -14,6 +14,9 @@ def mock_graphiti():
     """Mock Graphiti instance for testing."""
     graphiti = Mock()
     graphiti.search_ = AsyncMock()
+    # Make add_episode awaitable and return a dummy result with uuid
+    graphiti.add_episode = AsyncMock(return_value=Mock(uuid="ep123"))
+    
     # Disable optional cross-layer expansion logic (it expects a real neo4j driver).
     graphiti.driver = None
     graphiti._driver = None
@@ -93,15 +96,21 @@ class TestMemoryOps:
 
     @pytest.mark.asyncio
     async def test_remember_text_calls_ingest(self, memory_ops, mock_graphiti):
-        """Test that remember_text calls the underlying ingest function."""
-        # Patch the imported remember_text symbol inside core.memory_ops
-        import core.memory_ops as mem_mod
-        mem_mod.remember_text = AsyncMock(return_value={"status": "ok", "chunks": 1})
-
+        """Test that remember_text calls the underlying ingest pipeline (add_episode)."""
+        # Call remember_text
         result = await memory_ops.remember_text("test text", memory_type="personal")
 
-        assert result["status"] == "ok"
-        mem_mod.remember_text.assert_called_once()
+        # Verify result and call
+        assert result["status"] == "success"
+        assert result["uuid"] == "ep123"
+        mock_graphiti.add_episode.assert_called_once()
+        
+        # Verify arguments passed to add_episode
+        call_kwargs = mock_graphiti.add_episode.call_args.kwargs
+        assert call_kwargs["episode_body"] == "test text"
+        assert call_kwargs["group_id"] is not None # Should be resolved to personal_group_id (mocked config or default?)
+        # Actually resolve_group_id relies on config. 
+        # But we can check it's passed.
 
     @pytest.mark.asyncio
     async def test_search_memory_combines_results(self, memory_ops, mock_graphiti):
