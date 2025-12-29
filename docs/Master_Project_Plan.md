@@ -1,4 +1,11 @@
-# MASTER PLAN: Полный путь к Fractal Memory v2
+# MASTER PLAN: Полный путь к Fractal Memory v2 (Historical Plan)
+
+> **Note**: This document outlines the original 9-day implementation plan.
+> The project has successfully completed the "Foundation" phase and evolved into a "Graphiti Native" architecture (v2.0).
+> Key deviations from this original plan:
+> - **Custom Entities**: Simplified in favor of standard Graphiti entities + labeling.
+> - **L2/L3**: Implemented using Communities and LLM Synthesis (instead of manual patterns).
+> - **Structure**: `scripts/` folder is much richer than planned.
 
 ## 📅 TIMELINE: 9 дней + недели интеграции
 

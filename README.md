@@ -41,8 +41,11 @@ python main.py context "Fractal Memory" --size full
 
 # Слои памяти
 python main.py l1 --query "Fractal Memory" --hours 24
-python main.py l2 "Sergey"
-python main.py l3 "Fractal Memory"
+python main.py l2 "Sergey"  # Uses Graphiti Communities
+python main.py l3 "Fractal Memory"  # Uses LLM Synthesis
+
+# Ingest Architecture (Self-Awareness)
+python scripts/ingest_manifest.py
 
 # Визуализация и бенчмарки
 python main.py viz-export --output visualization/graph_data.json
@@ -107,22 +110,29 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 Скрипты для обслуживания графа и исправления данных:
 
 *   `scripts/audit_authorship.py` — Проверка целостности связей авторства (`[:AUTHORED]`) и идентификации (`[:IS]`).
-*   `scripts/backfill_authored_edges.py` — Автоматическое создание связей авторства для эпизодов, потерявших их (например, при сбоях).
-*   `scripts/seed_identity.py` — Создание семантической сущности пользователя и связывание её с User-аккаунтом.
+*   `scripts/backfill_authored_edges.py` — Автоматическое создание связей авторства для эпизодов.
+*   `scripts/seed_identity.py` — Создание семантической сущности пользователя.
+*   `scripts/generate_project_map.py` — Анализ структуры проекта (создает JSON карту).
+*   `scripts/json_to_markdown_manifest.py` — Конвертация карты проекта в Markdown манифест.
+*   `scripts/ingest_manifest.py` — Загрузка манифеста архитектуры в память (Self-Awareness).
 
-## Связность графа (SAME_AS)
-Для объединения слоёв (Personal/Project/Knowledge) используются связи `[:SAME_AS]`, которые создаются автоматически при импорте.
+## Связность графа (Namespacing & Search)
+Проект использует строгую изоляцию данных через `group_id` (Namespaces):
+- `personal`: Личные факты о пользователе.
+- `project`: Техническая информация о проекте (код, архитектура).
+- `knowledge`: Общие знания.
+- `experience`: Опыт выполнения задач.
+
+**Важно**: Мы отказались от автоматического создания связей `[:SAME_AS]` между разными `group_id`.
+Вместо "сшивки" графа используется **Multi-Namespace Search**: агент ищет информацию одновременно во всех нужных группах и объединяет результаты на уровне приложения (RRF Hybrid Search).
 
 ### Полезные Cypher-запросы для мониторинга:
 
-**А. Общая статистика связности:**
+**А. Статистика по группам (Namespaces):**
 ```cypher
 MATCH (e:Entity)
-WITH count(e) as entities
-MATCH ()-[r:SAME_AS]->()
-WITH entities, count(r) as bridges
-MATCH ()-[r2:RELATES_TO]->()
-RETURN entities, bridges, count(r2) as semantic_relations
+RETURN e.group_id, count(e) as count
+ORDER BY count DESC
 ```
 
 **Б. Топ "мостовых" сущностей:**

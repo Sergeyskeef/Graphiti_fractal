@@ -1,4 +1,11 @@
-# ДЕНЬ 5-7: Fractal Layers Implementation
+# ДЕНЬ 5-7: Fractal Layers Implementation (Historical Log)
+
+> **Warning**: This document represents the *initial design* and prototype code from Days 5-7.
+> Current implementation (v2.0) differs significantly:
+> - **L2** uses native Graphiti Communities (`graphiti.build_communities()`).
+> - **L3** uses LLM synthesis on top of community summaries.
+> - **Ingestion** uses `ingest_pipeline` with chunking.
+> Refer to `layers/` directory for actual code.
 
 ## День 5: L1 Optimization - Episode Summary
 
