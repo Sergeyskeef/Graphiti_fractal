@@ -86,7 +86,7 @@ class AppSettings(BaseSettings):
     """Application-level settings."""
     
     # Limits
-    max_chat_turn_chars: int = Field(default=8000, alias="MAX_CHAT_TURN_CHARS")
+    max_chat_turn_chars: int = Field(default=12000, alias="MAX_CHAT_TURN_CHARS")
     max_context_tokens: int = Field(default=4000, alias="MAX_CONTEXT_TOKENS")
     max_embedding_chars: int = Field(default=12000, alias="MAX_EMBEDDING_CHARS")
     

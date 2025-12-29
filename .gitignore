@@ -36,3 +36,7 @@ Thumbs.db
 .coverage
 htmlcov/
 .embedding_cache.json
+
+# Generated Artifacts
+architecture_manifest.md
+project_structure.json

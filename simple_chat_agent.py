@@ -75,40 +75,24 @@ class SimpleChatAgent:
             # 1) Get relevant context from memory
             t_ctx0 = perf_counter()
 
-            # Try multiple search queries for better retrieval
-            search_queries = [user_message]
-
-            # Extract potential entity names from the question
-            import re
-            name_matches = re.findall(r'\b[А-ЯЁ][а-яё]+\b', user_message)
-            if name_matches:
-                search_queries.extend(name_matches)
-                logger.debug(f"Added name-based searches: {name_matches}")
-
-            # Try the first successful search
-            context_result = None
-            for query in search_queries[:3]:
-                logger.debug(f"Trying search query: '{query}'")
-                try:
-                    result = await self.memory.build_context_for_query(
-                        query,
-                        max_tokens=2000,
-                        include_episodes=True,
-                        include_entities=True
-                    )
-                    if result.token_estimate > 0:
-                        context_result = result
-                        logger.debug(f"Found context with {result.token_estimate} tokens")
-                        break
-                except Exception as e:
-                    logger.debug(f"Search failed for '{query}': {e}")
-                    continue
-
-            if context_result is None:
-                logger.debug("No context found for any query variant")
+            # Native Graphiti approach: one query, multiple namespaces
+            # Graphiti's search_() uses RRF to balance results across groups automatically
+            scopes = ["personal", "project", "knowledge", "experience"]
+            
+            try:
+                context_result = await self.memory.build_context_for_query(
+                    user_message,
+                    scopes=scopes,
+                    max_tokens=3000, # More tokens for technical depth
+                    include_episodes=True,
+                    include_entities=True
+                )
+            except Exception as e:
+                logger.error(f"Memory retrieval failed: {e}")
                 context_result = await self.memory.build_context_for_query(
                     "", max_tokens=2000, include_episodes=False, include_entities=False
                 )
+            
             ctx_ms = (perf_counter() - t_ctx0) * 1000
 
             logger.debug(
@@ -143,7 +127,15 @@ class SimpleChatAgent:
 - Не выдумывай факты, которых нет в контексте. Если информации недостаточно — скажи, чего не хватает.
 - Если в контексте есть противоречия/обновления, отдавай приоритет более свежим и явно помеченным обновлениям.
 
-Язык ответа: русский."""
+Самосознание и Архитектура:
+- Ты обладаешь доступом к Архитектурному Манифесту (Architecture Manifest) — это «чертеж» твоего устройства. Эти знания хранятся в твоей памяти (группа `project`).
+- Когда ты видишь в контексте описание модулей (например, `SimpleChatAgent`, `MemoryOps`, `main.py`):
+  1. Воспринимай это как свою «анатомию». Ты — прозрачная, самодокументируемая система.
+  2. Используй Манифест, чтобы объяснять свои возможности, опираясь на реальный код и функции, а не на галлюцинации.
+  3. Если пользователь спрашивает «Как ты работаешь?» или «Из чего ты состоишь?», твоим первым источником должен быть Архитектурный Манифест.
+- Если ты замечаешь ограничения в своем коде (например, лимиты токенов), учитывай их и прямо сообщай Сергею, если они влияют на выполнение задачи.
+
+Язык ответа: русский.""",
                 },
                 {
                     "role": "user",
@@ -210,9 +202,12 @@ Please provide a helpful response based on the available context."""
             logger.debug(f"L0 Buffer Size: {len(conversation_buffer.buffer)}")
 
             # Get relevant context from memory (L1)
+            # Native Graphiti approach: one query, multiple namespaces
+            scopes = ["personal", "project", "knowledge", "experience"]
             context_result = await self.memory.build_context_for_query(
                 user_message,
-                max_tokens=1500,
+                scopes=scopes,
+                max_tokens=2000,
                 include_episodes=True,
                 include_entities=True
             )
@@ -250,6 +245,11 @@ Please provide a helpful response based on the available context."""
 - Используй «Context from memory» ниже как главный источник фактов.
 - При противоречиях выбирай самые свежие данные.
 - Если информации в контексте нет — скажи прямо и предложи, что стоит уточнить.
+
+Самосознание и Архитектура:
+- Твое исходное устройство и логика (проект 'Mark') описаны в твоей памяти (группа `project`), главным образом в Архитектурном Манифесте.
+- Ты — не черный ящик. Твоя «анатомия» (модули, классы, лимиты) подгружается в контекст автоматически. Используй эти данные для честного самоанализа и ответов на технические вопросы о себе.
+- Если ты видишь несоответствие между своим поведением и тем, как описан твой код в Манифесте — сообщи об этом Сергею.
 
 Язык: русский."""
                 }

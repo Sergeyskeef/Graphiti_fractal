@@ -275,12 +275,19 @@ async def ingest_text_document(
     start = perf_counter()
 
     # 1) Базовый профиль/обновление job
+    # Use robust chunking to handle large documents properly
+    from core.text_utils import split_into_semantic_chunks
+    chunks = split_into_semantic_chunks(text, max_chunk_size=1500, min_chunk_size=200)
+    total_chunks = len(chunks)
+    logger.info(f"[INGEST] Splitting text into {total_chunks} chunks (total len={len(text)})")
+
     on_rate_limit_cb = None
     warnings = []
+    
     if job_id:
         update_upload_job(job_id,
                           stage="ingest",
-                          total_chunks=1,
+                          total_chunks=total_chunks,
                           processed_chunks=0)
         
         def _on_rate_limit(sleep_s: float, attempt: int):
@@ -293,132 +300,112 @@ async def ingest_text_document(
             )
         on_rate_limit_cb = _on_rate_limit
 
-    # 2) Вызов Graphiti одним эпизодом
+    # 2) Вызов Graphiti по чанкам (Iterative add_episode)
     ref_time = datetime.now(timezone.utc)
-
     write_semaphore = get_write_semaphore()
-    async with write_semaphore:
-        from core.rate_limit_retry import with_rate_limit_retry
-        from pydantic import ValidationError
-        from core.safe_graphiti import filter_graphiti_results
-
-        try:
-            episode_result = await with_rate_limit_retry(
-                lambda: graphiti.add_episode(
-                    name=source_description or "Uploaded document",
-                    episode_body=text,
-                    source_description=source_description,
-                    reference_time=ref_time,
-                    group_id=group_id,  # Передаем group_id сразу в Graphiti
-                ),
-                op_name="add_episode:upload",
-                on_rate_limit=on_rate_limit_cb
-            )
-            
-            # Filter results for safety (especially for logging or further processing)
-            safe_results = filter_graphiti_results(episode_result)
-            
-            # Handle warnings for job status
-            warnings = []
-            if safe_results["dropped_entities"] > 0 or safe_results["dropped_edges"] > 0:
-                warn_msg = f"Dropped {safe_results['dropped_entities']} entities and {safe_results['dropped_edges']} edges due to validation errors"
-                warnings.append(warn_msg)
-                logger.warning(f"[INGEST] {warn_msg}", extra={
-                    "job_id": job_id,
-                    "dropped_entities": safe_results["dropped_entities"],
-                    "dropped_edges": safe_results["dropped_edges"]
-                })
-
-            actual_episode = episode_result.episode if hasattr(episode_result, 'episode') else episode_result
+    
+    added_count = 0
+    errors = []
+    
+    from core.rate_limit_retry import with_rate_limit_retry
+    from pydantic import ValidationError
+    from core.safe_graphiti import filter_graphiti_results
+    
+    for i, chunk in enumerate(chunks, 1):
+        # Update chunk description to include part number if multiple chunks
+        chunk_source = f"{source_description} (part {i}/{total_chunks})" if total_chunks > 1 else source_description
         
-        except ValidationError as ve:
-            # If the library fails to validate its own output, we log it but try to continue 
-            # by finding the episodic node we just (likely) created.
-            logger.error(f"[INGEST] Validation error during Graphiti ingestion: {ve}")
-            warnings = ["Graphiti returned malformed entities/edges, but the episode was likely created."]
-            
-            # Fallback: find the episode by source and reference_time (approximate)
-            # or by content matching if we had a fingerprint (but we don't have it here yet)
-            driver = graphiti.driver
-            find_query = """
-            MATCH (e:Episodic)
-            WHERE e.content = $content AND e.source_description = $source
-            RETURN e.uuid AS uuid
-            ORDER BY e.created_at DESC
-            LIMIT 1
-            """
-            find_res = await driver.execute_query(find_query, content=text, source=source_description or "Uploaded document")
-            if find_res.records:
-                # We found the episode! We can continue.
-                from collections import namedtuple
-                ActualEpisode = namedtuple('ActualEpisode', ['uuid'])
-                actual_episode = ActualEpisode(uuid=find_res.records[0]['uuid'])
-                logger.info(f"[INGEST] Recovered episode UUID after ValidationError: {actual_episode.uuid}")
-            else:
-                # Truly failed
-                raise HTTPException(status_code=500, detail=f"Graphiti validation error and could not recover: {ve}")
-        except Exception as e:
-            logger.error(f"[INGEST] Unexpected error during Graphiti ingestion: {e}", exc_info=True)
-            raise
-
-        if actual_episode and actual_episode.uuid:
+        async with write_semaphore:
             try:
-                # Truncate for embedding if too long
-                max_embed_chars = config.app.max_embedding_chars
-                embed_text = text
-                if len(text) > max_embed_chars:
-                    logger.warning(
-                        f"Text too long ({len(text)} chars), "
-                        f"truncating to {max_embed_chars} for embedding"
-                    )
-                    embed_text = text[:max_embed_chars]
+                episode_result = await with_rate_limit_retry(
+                    lambda: graphiti.add_episode(
+                        name=chunk_source[:100],
+                        episode_body=chunk,
+                        source_description=source_description, # Keep original source grouping
+                        reference_time=ref_time,
+                        group_id=group_id,  # Передаем group_id сразу в Graphiti
+                    ),
+                    op_name=f"add_episode:upload:{i}",
+                    on_rate_limit=on_rate_limit_cb
+                )
+                
+                # Filter results for safety
+                safe_results = filter_graphiti_results(episode_result)
+                
+                if safe_results["dropped_entities"] > 0 or safe_results["dropped_edges"] > 0:
+                    warn_msg = f"Chunk {i}: Dropped {safe_results['dropped_entities']} entities and {safe_results['dropped_edges']} edges"
+                    warnings.append(warn_msg)
 
-                vec = await get_embedding(embed_text)
-                if vec:
-                    await set_embedding(graphiti, text, vec)
-                    # Verify it stuck using UUID
-                    verify_query = "MATCH (e:Episodic {uuid: $uuid}) SET e.embedding = $vec RETURN size(e.embedding) as sz"
-                    verify_res = await graphiti.driver.execute_query(verify_query, uuid=actual_episode.uuid, vec=vec)
-                    if verify_res.records and verify_res.records[0]['sz'] == 1536:
-                        logger.info(f"Enforced embedding for episode {actual_episode.uuid}")
-                    else:
-                        logger.warning(f"Failed to verify embedding write for {actual_episode.uuid}")
-                else:
-                    logger.error(f"Failed to generate embedding for episode {actual_episode.uuid}")
+                actual_episode = episode_result.episode if hasattr(episode_result, 'episode') else episode_result
+                
+                # Post-processing for this chunk
+                if actual_episode and getattr(actual_episode, 'uuid', None):
+                    ep_uuid = actual_episode.uuid
+                    added_count += 1
+                    
+                    # Embedding enforcement (optional but good for retrieval)
+                    try:
+                        max_embed_chars = config.app.max_embedding_chars
+                        embed_text = chunk[:max_embed_chars]
+                        vec = await get_embedding(embed_text)
+                        if vec:
+                            await set_embedding(graphiti, chunk, vec)
+                    except Exception as e:
+                        logger.warning(f"Embedding failed for chunk {i}: {e}")
+
+                    # Author link
+                    if user_id:
+                        from core.authorship import attach_author
+                        await attach_author(ep_uuid, user_id)
+                        
+                    # Group ID enforcement
+                    if group_id:
+                         await set_group_id(graphiti, chunk, group_id)
+
+            except ValidationError as ve:
+                logger.error(f"[INGEST] Chunk {i} validation error: {ve}")
+                warnings.append(f"Chunk {i} validation error: {ve}")
+                # Try recovery logic if needed, or just skip
             except Exception as e:
-                logger.error(f"Error enforcing embedding for episode {actual_episode.uuid}: {e}")
-
-    # 3) Линковка с User, если есть user_id (как уже было в проекте)
-    if user_id and actual_episode and actual_episode.uuid:
-        from core.authorship import attach_author
-        await attach_author(actual_episode.uuid, user_id)
-
-    # 4) Установка group_id для эпизода (fallback, если Graphiti не установил)
-    if group_id:
-        try:
-            await set_group_id(graphiti, text, group_id)
-        except Exception as e:
-            logger.warning(f"Failed to set group_id via Cypher: {e}")
+                logger.error(f"[INGEST] Chunk {i} failed: {e}", exc_info=True)
+                errors.append(f"Chunk {i}: {str(e)}")
+        
+        # Update job progress after each chunk
+        if job_id:
+             update_upload_job(job_id,
+                          stage="ingest",
+                          total_chunks=total_chunks,
+                          processed_chunks=i)
 
     # 5) Обновление job и профиля
     elapsed = perf_counter() - start
+    
+    if errors:
+        final_stage = "done_with_warnings" if added_count > 0 else "error"
+        warnings.extend(errors)
+    elif warnings:
+        final_stage = "done_with_warnings"
+    else:
+        final_stage = "done"
+
     if job_id:
         update_upload_job(job_id,
-                          stage="done",
-                          total_chunks=1,
-                          processed_chunks=1,
-                          profile={"total_time": elapsed})
+                          stage=final_stage,
+                          total_chunks=total_chunks,
+                          processed_chunks=added_count,
+                          profile={"total_time": elapsed},
+                          warnings=warnings)
 
     logger.info(
-        f"Document ingested: source='{source_description}' len={len(text)} elapsed={elapsed:.3f}s"
+        f"Document ingested: source='{source_description}' chunks={added_count}/{total_chunks} elapsed={elapsed:.3f}s"
     )
 
     return {
-        "status": "ok",
-        "added": 1,
-        "chunks": 1,
+        "status": "ok" if final_stage != "error" else "error",
+        "added": added_count,
+        "chunks": total_chunks,
         "elapsed": elapsed,
-        "warnings": warnings if 'warnings' in locals() else []
+        "warnings": warnings
     }
 
 
